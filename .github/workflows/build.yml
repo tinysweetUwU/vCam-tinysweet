@@ -1,0 +1,76 @@
+name: Build VCam DEB packages
+
+on:
+  push:
+    branches: ["main", "master"]
+  pull_request:
+    branches: ["main", "master"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build rootless and RootHide packages
+    runs-on: macos-14
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      # Key the cache to the upstream revisions so a new Theos/SDK release
+      # automatically gets a fresh cache while normal project commits reuse it.
+      - name: Resolve Theos and SDK revisions
+        shell: bash
+        run: |
+          set -euo pipefail
+          THEOS_REV="$(git ls-remote https://github.com/roothide/theos.git HEAD | awk 'NR == 1 {print $1}')"
+          SDKS_REV="$(git ls-remote https://github.com/theos/sdks.git refs/heads/master | awk 'NR == 1 {print $1}')"
+          test -n "$THEOS_REV"
+          test -n "$SDKS_REV"
+          echo "THEOS_REV=$THEOS_REV" >> "$GITHUB_ENV"
+          echo "SDKS_REV=$SDKS_REV" >> "$GITHUB_ENV"
+
+      - name: Cache Theos and iOS SDKs
+        id: theos-cache
+        uses: actions/cache@v4
+        with:
+          path: theos
+          key: ${{ runner.os }}-theos-${{ env.THEOS_REV }}-sdks-${{ env.SDKS_REV }}
+
+      - name: Set up Theos (RootHide fork supports both schemes)
+        uses: iossxx/theos-action@v1
+        with:
+          theos-dir: theos
+          theos-src: https://github.com/roothide/theos
+          theos-sdks: https://github.com/theos/sdks
+          theos-sdks-branch: master
+
+      - name: Set up GNU Make
+        run: echo "$(brew --prefix)/opt/make/libexec/gnubin" >> "$GITHUB_PATH"
+
+      - name: Build rootless DEB
+        shell: bash
+        run: |
+          set -euo pipefail
+          make clean
+          make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless -j"$(sysctl -n hw.ncpu)"
+          mkdir -p dist
+          cp packages/*.deb dist/vcam-rootless.deb
+
+      - name: Build RootHide DEB
+        shell: bash
+        run: |
+          set -euo pipefail
+          make clean
+          rm -f packages/*.deb
+          make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=roothide -j"$(sysctl -n hw.ncpu)"
+          cp packages/*.deb dist/vcam-roothide.deb
+
+      - name: Upload DEB artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: vcam-deb-packages
+          path: dist/*.deb
+          if-no-files-found: error
+          retention-days: 14

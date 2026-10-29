@@ -1,0 +1,9 @@
+Package: com.yourcompany.vcam
+Name: VCam
+Version: 0.1.0
+Architecture: iphoneos-arm64
+Description: Virtual camera replacement with an on-device media control menu.
+Maintainer: VCam Contributors
+Author: VCam Contributors
+Section: Tweaks
+Depends: mobilesubstrate (>= 0.9.5000)
