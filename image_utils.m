@@ -38,6 +38,10 @@ static BOOL sHasReadSettings = NO;
 static BOOL sIsLoading = NO;
 static NSString *sRequestedPath = nil;
 static NSString *sLoadedPath = nil;
+static NSString *sLastObservedPath = nil;
+static BOOL sLastObservedEnabled = NO;
+static BOOL sHasLoggedObservedState = NO;
+static BOOL sHasLoggedFirstRender = NO;
 
 static void VCamEnsureState(void) {
     dispatch_once(&sLockOnce, ^{
@@ -77,14 +81,20 @@ static UIImage *VCamDownsampleVideoFrame(CVPixelBufferRef pixelBuffer, CIContext
 static BOOL VCamDecodeMedia(NSString *path, UIImage **imageOut, NSArray<UIImage *> **framesOut) {
     if (imageOut) *imageOut = nil;
     if (framesOut) *framesOut = nil;
-    if (path.length == 0 || ![[NSFileManager defaultManager] fileExistsAtPath:path]) return NO;
+    if (path.length == 0 || ![[NSFileManager defaultManager] fileExistsAtPath:path]) {
+        NSLog(@"[VCam] replacement media path does not exist or is not visible to mediaserverd: %@", path ?: @"<nil>");
+        return NO;
+    }
 
     NSString *extension = path.pathExtension.lowercaseString;
     NSSet *videoExtensions = [NSSet setWithArray:@[@"mp4", @"mov", @"m4v"]];
     if (![videoExtensions containsObject:extension]) {
         NSURL *imageURL = [NSURL fileURLWithPath:path];
         CGImageSourceRef imageSource = CGImageSourceCreateWithURL((__bridge CFURLRef)imageURL, NULL);
-        if (!imageSource) return NO;
+        if (!imageSource) {
+            NSLog(@"[VCam] could not create image source for %@", path);
+            return NO;
+        }
         NSDictionary *thumbnailOptions = @{
             (__bridge NSString *)kCGImageSourceCreateThumbnailFromImageAlways: @YES,
             (__bridge NSString *)kCGImageSourceCreateThumbnailWithTransform: @YES,
@@ -94,7 +104,10 @@ static BOOL VCamDecodeMedia(NSString *path, UIImage **imageOut, NSArray<UIImage 
         CGImageRef thumbnail = CGImageSourceCreateThumbnailAtIndex(imageSource, 0,
                                                                     (__bridge CFDictionaryRef)thumbnailOptions);
         CFRelease(imageSource);
-        if (!thumbnail) return NO;
+        if (!thumbnail) {
+            NSLog(@"[VCam] could not decode image thumbnail: %@", path);
+            return NO;
+        }
         UIImage *image = [UIImage imageWithCGImage:thumbnail scale:1.0 orientation:UIImageOrientationUp];
         CGImageRelease(thumbnail);
         if (imageOut) *imageOut = image;
@@ -105,10 +118,16 @@ static BOOL VCamDecodeMedia(NSString *path, UIImage **imageOut, NSArray<UIImage 
     AVURLAsset *asset = [AVURLAsset URLAssetWithURL:url options:@{ AVURLAssetPreferPreciseDurationAndTimingKey: @NO }];
     NSError *error = nil;
     AVAssetReader *reader = [[AVAssetReader alloc] initWithAsset:asset error:&error];
-    if (!reader || error) return NO;
+    if (!reader || error) {
+        NSLog(@"[VCam] could not create video reader for %@: %@", path, error);
+        return NO;
+    }
 
     NSArray<AVAssetTrack *> *tracks = [asset tracksWithMediaType:AVMediaTypeVideo];
-    if (tracks.count == 0) return NO;
+    if (tracks.count == 0) {
+        NSLog(@"[VCam] selected video has no video track: %@", path);
+        return NO;
+    }
 
     NSDictionary *settings = @{
         (NSString *)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA)
@@ -116,9 +135,15 @@ static BOOL VCamDecodeMedia(NSString *path, UIImage **imageOut, NSArray<UIImage 
     AVAssetReaderTrackOutput *output = [[AVAssetReaderTrackOutput alloc] initWithTrack:tracks.firstObject
                                                                          outputSettings:settings];
     output.alwaysCopiesSampleData = NO;
-    if (![reader canAddOutput:output]) return NO;
+    if (![reader canAddOutput:output]) {
+        NSLog(@"[VCam] video reader cannot add track output: %@", path);
+        return NO;
+    }
     [reader addOutput:output];
-    if (![reader startReading]) return NO;
+    if (![reader startReading]) {
+        NSLog(@"[VCam] video reader failed to start for %@: %@", path, reader.error);
+        return NO;
+    }
 
     CIContext *decodeContext = [CIContext contextWithOptions:@{ kCIContextUseSoftwareRenderer: @NO }];
     NSMutableArray<UIImage *> *frames = [NSMutableArray arrayWithCapacity:VCAM_VIDEO_MAX_FRAMES];
@@ -142,7 +167,10 @@ static BOOL VCamDecodeMedia(NSString *path, UIImage **imageOut, NSArray<UIImage 
         }
     }
     if (reader.status == AVAssetReaderStatusReading) [reader cancelReading];
-    if (frames.count == 0) return NO;
+    if (frames.count == 0) {
+        NSLog(@"[VCam] decoded zero video frames from %@; status=%ld error=%@", path, (long)reader.status, reader.error);
+        return NO;
+    }
     if (framesOut) *framesOut = [frames copy];
     return YES;
 }
@@ -167,8 +195,17 @@ void loadReplacementMedia(void) {
         sZoom = MAX(0.5, MIN(3.0, VCamNumber(VCamCopySetting(VCamZoomKey), 1.0)));
         sRotation = (NSInteger)VCamNumber(VCamCopySetting(VCamRotationKey), 0);
 
-        if (!sEnabled) return;
         id pathValue = VCamCopySetting(VCamMediaPathKey);
+        NSString *observedPath = [pathValue isKindOfClass:[NSString class]] ? [(NSString *)pathValue copy] : nil;
+        if (!sHasLoggedObservedState || sLastObservedEnabled != sEnabled ||
+            !((sLastObservedPath == observedPath) || [sLastObservedPath isEqualToString:observedPath])) {
+            NSLog(@"[VCam] daemon settings changed: enabled=%@ path=%@", sEnabled ? @"YES" : @"NO", observedPath ?: @"<none>");
+            sLastObservedEnabled = sEnabled;
+            sLastObservedPath = observedPath;
+            sHasLoggedObservedState = YES;
+        }
+
+        if (!sEnabled) return;
         if (![pathValue isKindOfClass:[NSString class]] || [(NSString *)pathValue length] == 0) return;
         newPath = [(NSString *)pathValue copy];
         if ([newPath isEqualToString:sLoadedPath] || (sIsLoading && [newPath isEqualToString:sRequestedPath])) return;
@@ -196,12 +233,14 @@ void loadReplacementMedia(void) {
                 sLoadedPath = [newPath copy];
                 sVideoStartTime = 0;
                 if (!success) {
+                    NSLog(@"[VCam] failed to load replacement media: %@", newPath);
                     sCurrentMode = VCamModeNone;
                     sReplacementImage = nil;
                     sVideoFrames = nil;
                     return;
                 }
                 if (image) {
+                    NSLog(@"[VCam] replacement image loaded: %@ (%zux%zu)", newPath, CGImageGetWidth(image.CGImage), CGImageGetHeight(image.CGImage));
                     sReplacementImage = image;
                     sVideoFrames = nil;
                     sCurrentMode = VCamModeImage;
@@ -209,6 +248,7 @@ void loadReplacementMedia(void) {
                     sReplacementImage = nil;
                     sVideoFrames = frames;
                     sCurrentMode = VCamModeVideo;
+                    NSLog(@"[VCam] replacement video loaded: %@ (%lu sampled frames)", newPath, (unsigned long)frames.count);
                 }
             }
         }
@@ -265,5 +305,9 @@ void drawReplacementOntoBuffer(CVPixelBufferRef targetBuffer) {
                                     imageByCroppingToRect:targetRect];
         CIImage *finalImage = [[source imageByCompositingOverImage:blackBackground] imageByCroppingToRect:targetRect];
         [sRenderContext render:finalImage toCVPixelBuffer:targetBuffer bounds:targetRect colorSpace:sRenderColorSpace];
+        if (!sHasLoggedFirstRender) {
+            sHasLoggedFirstRender = YES;
+            NSLog(@"[VCam] first replacement frame rendered into camera buffer (%zux%zu)", targetWidth, targetHeight);
+        }
     }
 }

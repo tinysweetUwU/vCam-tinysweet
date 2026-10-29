@@ -33,12 +33,19 @@ void VCamSetSetting(NSString *key, id value) {
                                   withIntermediateDirectories:YES
                                                    attributes:@{ NSFilePosixPermissions: @0755 }
                                                         error:&error];
-        if (!error && [settings writeToFile:path atomically:YES]) {
+        if (!error) chmod(directory.fileSystemRepresentation, 0755);
+        BOOL didWrite = !error && [settings writeToFile:path atomically:YES];
+        if (didWrite) {
             chmod(path.fileSystemRepresentation, 0644);
+        } else {
+            NSLog(@"[VCam] failed to write shared settings %@: %@", path, error);
         }
     }
 }
 
 NSString *VCamMediaDirectory(void) {
-    return @"/var/mobile/Media/VCam";
+    // mediaserverd is sandboxed differently from SpringBoard on some iOS builds.
+    // A shared world-readable temporary directory is accessible to both processes,
+    // matching the location used by the original BWNodeOutput proof of concept.
+    return @"/tmp/VCam";
 }
