@@ -14,37 +14,62 @@ jobs:
   build:
     name: Build rootless and RootHide packages
     runs-on: macos-14
+    env:
+      THEOS: ${{ github.workspace }}/theos
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
 
-      # Key the cache to the upstream revisions so a new Theos/SDK release
-      # automatically gets a fresh cache while normal project commits reuse it.
+      # Resolve immutable revisions so cache entries are refreshed automatically
+      # whenever either upstream repository advances.
       - name: Resolve Theos and SDK revisions
+        id: revisions
         shell: bash
         run: |
           set -euo pipefail
           THEOS_REV="$(git ls-remote https://github.com/roothide/theos.git HEAD | awk 'NR == 1 {print $1}')"
-          SDKS_REV="$(git ls-remote https://github.com/theos/sdks.git refs/heads/master | awk 'NR == 1 {print $1}')"
+          SDKS_REV="$(git ls-remote https://github.com/theos/sdks.git HEAD | awk 'NR == 1 {print $1}')"
           test -n "$THEOS_REV"
           test -n "$SDKS_REV"
           echo "THEOS_REV=$THEOS_REV" >> "$GITHUB_ENV"
           echo "SDKS_REV=$SDKS_REV" >> "$GITHUB_ENV"
+          echo "theos_rev=$THEOS_REV" >> "$GITHUB_OUTPUT"
+          echo "sdks_rev=$SDKS_REV" >> "$GITHUB_OUTPUT"
 
       - name: Cache Theos and iOS SDKs
         id: theos-cache
         uses: actions/cache@v4
         with:
           path: theos
-          key: ${{ runner.os }}-theos-${{ env.THEOS_REV }}-sdks-${{ env.SDKS_REV }}
+          key: ${{ runner.os }}-theos-${{ steps.revisions.outputs.theos_rev }}-sdks-${{ steps.revisions.outputs.sdks_rev }}
 
-      - name: Set up Theos (RootHide fork supports both schemes)
-        uses: iossxx/theos-action@v1
-        with:
-          theos-dir: theos
-          theos-src: https://github.com/roothide/theos
-          theos-sdks: https://github.com/theos/sdks
-          theos-sdks-branch: master
+      # Install dependencies outside the cache because GitHub-hosted runners are
+      # newly provisioned for each run.
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew install dpkg ldid make
+
+      # Set up Theos directly whenever the exact matching cache entry does not exist.
+      - name: Install Theos and iOS SDKs
+        if: steps.theos-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --recursive https://github.com/roothide/theos.git "$THEOS"
+          git -C "$THEOS" checkout "$THEOS_REV"
+          git -C "$THEOS" submodule update --init --recursive
+          git clone https://github.com/theos/sdks.git "$THEOS/sdks"
+          git -C "$THEOS/sdks" checkout "$SDKS_REV"
+
+      - name: Verify Theos and SDKs
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f "$THEOS/makefiles/common.mk"
+          test -d "$THEOS/sdks"
+          find "$THEOS/sdks" -maxdepth 1 -type d -name '*.sdk' -print -quit | grep -q .
 
       - name: Set up GNU Make
         run: echo "$(brew --prefix)/opt/make/libexec/gnubin" >> "$GITHUB_PATH"
@@ -56,7 +81,9 @@ jobs:
           make clean
           make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless -j"$(sysctl -n hw.ncpu)"
           mkdir -p dist
-          cp packages/*.deb dist/vcam-rootless.deb
+          set -- packages/*.deb
+          test -f "$1"
+          cp "$1" dist/vcam-rootless.deb
 
       - name: Build RootHide DEB
         shell: bash
@@ -65,7 +92,9 @@ jobs:
           make clean
           rm -f packages/*.deb
           make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=roothide -j"$(sysctl -n hw.ncpu)"
-          cp packages/*.deb dist/vcam-roothide.deb
+          set -- packages/*.deb
+          test -f "$1"
+          cp "$1" dist/vcam-roothide.deb
 
       - name: Upload DEB artifacts
         uses: actions/upload-artifact@v4
