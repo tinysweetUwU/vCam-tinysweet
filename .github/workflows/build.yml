@@ -60,6 +60,10 @@ jobs:
           git clone --recursive https://github.com/roothide/theos.git "$THEOS"
           git -C "$THEOS" checkout "$THEOS_REV"
           git -C "$THEOS" submodule update --init --recursive
+
+          # The roothide/theos checkout may already contain an sdks directory.
+          # Replace it explicitly before cloning the separately pinned SDK repo.
+          rm -rf "$THEOS/sdks"
           git clone https://github.com/theos/sdks.git "$THEOS/sdks"
           git -C "$THEOS/sdks" checkout "$SDKS_REV"
 
