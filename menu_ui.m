@@ -307,7 +307,19 @@ static UILabel *VCamMakeLabel(NSString *text, UIFont *font, UIColor *color) {
     if (sOverlayWindow && !sOverlayWindow.hidden) return;
     dispatch_async(dispatch_get_main_queue(), ^{
         if (sOverlayWindow && !sOverlayWindow.hidden) return;
-        VCamOverlayWindow *window = [[VCamOverlayWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
+        UIWindowScene *activeScene = nil;
+        for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+            if ([scene isKindOfClass:[UIWindowScene class]] &&
+                scene.activationState == UISceneActivationStateForegroundActive) {
+                activeScene = (UIWindowScene *)scene;
+                break;
+            }
+        }
+
+        VCamOverlayWindow *window = activeScene
+            ? [[VCamOverlayWindow alloc] initWithWindowScene:activeScene]
+            : [[VCamOverlayWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
+        window.frame = UIScreen.mainScreen.bounds;
         window.windowLevel = UIWindowLevelAlert + 100.0;
         window.backgroundColor = UIColor.clearColor;
         window.rootViewController = [[VCamMenuViewController alloc] init];

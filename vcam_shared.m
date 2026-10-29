@@ -1,7 +1,7 @@
 #import "vcam_shared.h"
 #import <sys/stat.h>
 
-NSString * const VCamPreferenceDomain = @"com.yourcompany.vcam";
+NSString * const VCamPreferenceDomain = @"com.tinysweet.vcamios";
 NSString * const VCamMediaPathKey = @"MediaPath";
 NSString * const VCamEnabledKey = @"Enabled";
 NSString * const VCamOffsetXKey = @"OffsetX";

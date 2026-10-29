@@ -1,55 +1,82 @@
 #import <UIKit/UIKit.h>
-#import <objc/message.h>
 #import <QuartzCore/QuartzCore.h>
 #import "vcam_shared.h"
 #import "vcam_menu.h"
 
-// SBVolumeControl receives this selector on current SpringBoard releases when
-// a physical volume key changes the system volume. Pair opposite directions
-// in a short window to approximate a simultaneous chord.
-@interface SBVolumeControl : NSObject
-- (float)_effectiveVolume;
-- (void)setVolume:(float)volume forKeyPress:(BOOL)forKeyPress;
+// SpringBoard forwards physical volume-button transitions through this private
+// UIKit method. This is more reliable than inferring button presses from volume
+// changes, especially when both buttons are pressed close together.
+@interface SpringBoard : UIApplication
+- (BOOL)_handlePhysicalButtonEvent:(UIPressesEvent *)event;
 @end
 
-static NSInteger sLastVolumeDirection = 0;
-static CFTimeInterval sLastVolumeChange = 0;
+static NSInteger sPendingVolumeDirection = 0;
+static CFTimeInterval sPendingVolumeTime = 0;
+static CFTimeInterval sLastMenuToggleTime = 0;
+static const CFTimeInterval VCamChordWindow = 0.45;
+static const CFTimeInterval VCamToggleDebounce = 0.90;
 
-static void VCamObserveVolumeChord(SBVolumeControl *controller, float requestedVolume, BOOL forKeyPress) {
-    if (!forKeyPress || !controller) return;
-    float currentVolume = 0.0f;
-    SEL currentSelector = @selector(_effectiveVolume);
-    if ([controller respondsToSelector:currentSelector]) {
-        currentVolume = ((float (*)(id, SEL))objc_msgSend)(controller, currentSelector);
-    }
-    NSInteger direction = requestedVolume >= currentVolume ? 1 : -1;
+static void VCamRegisterVolumeDirection(NSInteger direction) {
+    if (direction != 1 && direction != -1) return;
+
     CFTimeInterval now = CACurrentMediaTime();
-    BOOL matched = NO;
+    BOOL shouldToggle = NO;
 
     @synchronized ([VCamMenuPresenter class]) {
-        if (sLastVolumeDirection != 0 && direction != sLastVolumeDirection &&
-            (now - sLastVolumeChange) <= 0.35) {
-            matched = YES;
-            sLastVolumeDirection = 0;
-            sLastVolumeChange = 0;
-        } else {
-            sLastVolumeDirection = direction;
-            sLastVolumeChange = now;
+        // One physical press may generate more than one event. Ignore duplicate
+        // events during the debounce window instead of toggling twice.
+        if (now - sLastMenuToggleTime < VCamToggleDebounce) return;
+
+        if (sPendingVolumeDirection != 0 &&
+            now - sPendingVolumeTime <= VCamChordWindow &&
+            direction != sPendingVolumeDirection) {
+            shouldToggle = YES;
+            sPendingVolumeDirection = 0;
+            sPendingVolumeTime = 0;
+            sLastMenuToggleTime = now;
+        } else if (sPendingVolumeDirection == 0 ||
+                   now - sPendingVolumeTime > VCamChordWindow) {
+            sPendingVolumeDirection = direction;
+            sPendingVolumeTime = now;
         }
+        // Repeated events from the same held button do not extend the chord
+        // window, so they cannot prevent the opposite button from matching.
     }
 
-    if (matched) {
+    if (shouldToggle) {
+        NSLog(@"[VCam] Volume-button chord detected; toggling menu");
         dispatch_async(dispatch_get_main_queue(), ^{
             [VCamMenuPresenter toggleMenu];
         });
     }
 }
 
-%hook SBVolumeControl
+static void VCamObservePhysicalButtonEvent(UIPressesEvent *event) {
+    if (!event) return;
 
-- (void)setVolume:(float)volume forKeyPress:(BOOL)forKeyPress {
-    VCamObserveVolumeChord(self, volume, forKeyPress);
-    %orig(volume, forKeyPress);
+    // On the iOS 16/17 SpringBoard path, physical button types are 102 (volume
+    // up) and 103 (volume down); force is non-zero while the button is pressed.
+    for (UIPress *press in event.allPresses.allObjects) {
+        NSInteger type = (NSInteger)press.type;
+        if (type != 102 && type != 103) continue;
+
+        NSLog(@"[VCam] Physical volume event: type=%ld force=%.2f", (long)type, (double)press.force);
+        if (press.force <= 0.0) continue;
+
+        if (type == 102) VCamRegisterVolumeDirection(1);
+        else if (type == 103) VCamRegisterVolumeDirection(-1);
+    }
+}
+
+%hook SpringBoard
+
+- (BOOL)_handlePhysicalButtonEvent:(UIPressesEvent *)event {
+    VCamObservePhysicalButtonEvent(event);
+    return %orig(event);
 }
 
 %end
+
+%ctor {
+    NSLog(@"[VCam] SpringBoard menu/volume hook loaded");
+}
