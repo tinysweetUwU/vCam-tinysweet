@@ -13,7 +13,7 @@ NSString * const VCamOffsetYKey = @"OffsetY";
 NSString * const VCamRotationKey = @"Rotation";
 NSString * const VCamZoomKey = @"Zoom";
 NSString * const VCamVideoPausedKey = @"VideoPaused";
-NSString * const VCamRuntimeVersion = @"0.1.20";
+NSString * const VCamRuntimeVersion = @"0.1.21";
 
 static NSString *VCamPreferencesDirectory(void) {
     // Keep persistent preferences outside /tmp; only the selected media is temporary.
@@ -216,18 +216,6 @@ static void VCamPublishHeartbeatForProcess(NSString *processName) {
     if (notify_set_state(token, timestamp) == NOTIFY_STATUS_OK) {
         notify_post(VCamHeartbeatName(processName).UTF8String);
     }
-}
-
-static BOOL VCamEnsureSharedDirectory(void) {
-    NSString *directory = VCamMediaDirectory();
-    NSError *error = nil;
-    BOOL ok = [[NSFileManager defaultManager] createDirectoryAtPath:directory
-                                         withIntermediateDirectories:YES
-                                                          attributes:@{ NSFilePosixPermissions: @0755 }
-                                                               error:&error];
-    if (ok) chmod(directory.fileSystemRepresentation, 0755);
-    if (!ok) NSLog(@"[VCam] cannot create shared media directory %@: %@", directory, error);
-    return ok;
 }
 
 static BOOL VCamEnsurePreferencesDirectory(void) {
