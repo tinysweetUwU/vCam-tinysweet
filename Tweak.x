@@ -6,7 +6,7 @@
 #import <dispatch/dispatch.h>
 
 // BWNodeOutput is declared by Apple's private CMCapture framework. On some
-// iOS builds it is not registered when mediaserverd first loads third-party
+// iOS builds it is not registered when a camera daemon first loads third-party
 // tweaks. Load CMCapture explicitly, then install the Logos group only after
 // the class and selector are confirmed to exist.
 %group VCamCaptureHooks
@@ -97,7 +97,7 @@ static void VCamTryInstallCaptureHook(void) {
         VCamSetRuntimeStatus(@"hookDetail", @"BWNodeOutput exists but emitSampleBuffer: is missing");
     }
 
-    // Retry while mediaserverd is still bringing up its camera framework stack.
+    // Retry while the camera daemon is still bringing up its capture framework stack.
     if (sVCamHookAttempts < 30) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(NSEC_PER_SEC)),
                        dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
@@ -111,7 +111,8 @@ static void VCamTryInstallCaptureHook(void) {
 %ctor {
     @autoreleasepool {
         VCamResetRuntimeStatus();
-        NSLog(@"[VCam] mediaserverd tweak loaded; CMCapture hook installation starting");
+        NSString *processName = NSProcessInfo.processInfo.processName;
+        NSLog(@"[VCam] camera daemon tweak loaded in %@; CMCapture hook installation starting", processName);
         VCamTryInstallCaptureHook();
     }
 }

@@ -208,10 +208,26 @@ static UILabel *VCamMakeLabel(NSString *text, UIFont *font, UIColor *color) {
 }
 
 - (NSString *)diagnosticText {
-    NSDictionary *runtime = VCamCopyRuntimeStatus();
-    NSString *version = runtime[@"runtimeVersion"];
-    BOOL isCurrentRuntime = [version isEqualToString:VCamRuntimeVersion];
-    BOOL daemonLoaded = isCurrentRuntime && [runtime[@"daemonLoaded"] boolValue];
+    NSDictionary *combined = VCamCopyRuntimeStatus();
+    NSDictionary *daemonStatuses = [combined[@"daemonStatuses"] isKindOfClass:[NSDictionary class]]
+        ? combined[@"daemonStatuses"] : @{};
+    NSDictionary *cameraDaemon = [daemonStatuses[@"cameracaptured"] isKindOfClass:[NSDictionary class]]
+        ? daemonStatuses[@"cameracaptured"] : @{};
+    NSDictionary *mediaDaemon = [daemonStatuses[@"mediaserverd"] isKindOfClass:[NSDictionary class]]
+        ? daemonStatuses[@"mediaserverd"] : @{};
+
+    BOOL cameraCurrent = [cameraDaemon[@"runtimeVersion"] isEqualToString:VCamRuntimeVersion];
+    BOOL mediaCurrent = [mediaDaemon[@"runtimeVersion"] isEqualToString:VCamRuntimeVersion];
+    BOOL cameraLoaded = cameraCurrent && [cameraDaemon[@"daemonLoaded"] boolValue];
+    BOOL mediaLoaded = mediaCurrent && [mediaDaemon[@"daemonLoaded"] boolValue];
+    BOOL daemonLoaded = cameraLoaded || mediaLoaded;
+
+    // Prefer cameracaptured for the active camera graph; fall back to mediaserverd
+    // on OS builds that still deliver BWNodeOutput there.
+    NSDictionary *runtime = cameraLoaded ? cameraDaemon : (mediaLoaded ? mediaDaemon : @{});
+    if (runtime.count == 0) runtime = combined;
+
+    NSString *processName = [runtime[@"daemonProcess"] isKindOfClass:[NSString class]] ? runtime[@"daemonProcess"] : @"unknown";
     NSString *hookState = [runtime[@"hookState"] isKindOfClass:[NSString class]] ? runtime[@"hookState"] : @"unknown";
     BOOL framesSeen = [runtime[@"cameraFramesSeen"] boolValue];
     BOOL rendered = [runtime[@"replacementRendered"] boolValue];
@@ -220,26 +236,33 @@ static UILabel *VCamMakeLabel(NSString *text, UIFont *font, UIColor *color) {
     NSString *hookDetail = [runtime[@"hookDetail"] isKindOfClass:[NSString class]] ? runtime[@"hookDetail"] : @"";
     NSString *renderError = [runtime[@"renderError"] isKindOfClass:[NSString class]] ? runtime[@"renderError"] : @"";
 
-    NSString *daemonLine = daemonLoaded ? @"Daemon injection: YES" : @"Daemon injection: NO / no heartbeat";
-    NSString *hookLine = [NSString stringWithFormat:@"BWNodeOutput hook: %@", hookState.uppercaseString];
+    NSString *daemonLine = daemonLoaded
+        ? [NSString stringWithFormat:@"Camera daemon injection: YES (%@)", processName]
+        : @"Camera daemon injection: NO HEARTBEAT from cameracaptured or mediaserverd";
+    NSString *hookLine = [NSString stringWithFormat:@"BWNodeOutput hook (%@): %@", processName, hookState.uppercaseString];
     NSString *frameLine = framesSeen
         ? [NSString stringWithFormat:@"Camera frames: RECEIVED (%@)", runtime[@"cameraFrameSize"] ?: @"size unknown"]
-        : @"Camera frames: WAITING (open Camera app and start preview)";
+        : @"Camera frames: WAITING (open built-in Camera app and start preview)";
     NSString *mediaLine = [NSString stringWithFormat:@"Media: %@%@", mediaState.uppercaseString,
                            mediaDetail.length ? [@" — " stringByAppendingString:mediaDetail] : @""];
     NSString *outputLine = rendered
         ? [NSString stringWithFormat:@"Buffer render call: SENT (%@)", runtime[@"renderedFrameSize"] ?: @"size unknown"]
         : @"Buffer render call: NOT SENT YET";
 
-    NSMutableArray<NSString *> *lines = [NSMutableArray arrayWithArray:@[daemonLine, hookLine, frameLine, mediaLine, outputLine]];
+    NSMutableArray<NSString *> *lines = [NSMutableArray arrayWithArray:@[
+        daemonLine,
+        [NSString stringWithFormat:@"cameracaptured: %@", cameraLoaded ? @"INJECTED" : @"NO HEARTBEAT"],
+        [NSString stringWithFormat:@"mediaserverd: %@", mediaLoaded ? @"INJECTED" : @"NO HEARTBEAT"],
+        hookLine, frameLine, mediaLine, outputLine
+    ]];
     if (hookDetail.length) [lines addObject:[@"Hook detail: " stringByAppendingString:hookDetail]];
     if (renderError.length) [lines addObject:[@"Render error: " stringByAppendingString:renderError]];
     if (!daemonLoaded) {
-        [lines addObject:@"Action: install the correct rootless/RootHide package, then perform a userspace reboot. The menu alone does not mean the camera daemon tweak is loaded."];
+        [lines addObject:@"Action: neither camera daemon has reported VCam. This build targets both processes; verify the RootHide package is installed and Tweak Injection is enabled in Relaxin/ElleKit."];
     } else if (![hookState isEqualToString:@"installed"]) {
-        [lines addObject:@"Action: CMCapture/BWNodeOutput hook did not install. This is the camera-hook stage, not a media-selection issue."];
+        [lines addObject:@"Action: injection reached a camera daemon, but CMCapture/BWNodeOutput hook did not install. Check the Hook detail line."];
     } else if (!framesSeen) {
-        [lines addObject:@"Action: open the built-in Camera app, switch to Video or Photo preview, wait 5 seconds, then reopen this menu."];
+        [lines addObject:@"Action: the hook is installed. Open the built-in Camera app, start a live preview, wait 5 seconds, then reopen this menu."];
     } else if ([mediaState isEqualToString:@"disabled"]) {
         [lines addObject:@"Action: tap Enable Replacement, then open Camera and start its preview."];
     } else if ([mediaState isEqualToString:@"no-selection"]) {
@@ -247,12 +270,12 @@ static UILabel *VCamMakeLabel(NSString *text, UIFont *font, UIColor *color) {
     } else if ([mediaState containsString:@"failed"] || [mediaState containsString:@"not-found"] || [mediaState containsString:@"missing"]) {
         [lines addObject:@"Action: choose the photo/video again. The camera service could not read or decode it."];
     } else if (!rendered) {
-        [lines addObject:@"Action: the hook sees camera frames, but has not rendered replacement media yet. Check the Media line above."];
+        [lines addObject:@"Action: camera frames reached the hook, but no replacement buffer has been rendered yet. Check the Media line above."];
     } else {
-        [lines addObject:@"Status: the camera hook has submitted replacement pixels to the camera buffer. This status does not certify how every receiving app displays that buffer."];
+        [lines addObject:@"Status: replacement pixels were submitted to the camera buffer. This does not certify how every receiving app displays that buffer."];
     }
-    if (!isCurrentRuntime && runtime.count > 0) {
-        [lines insertObject:@"A status record from an older package was found; waiting for the new camera daemon instance." atIndex:0];
+    if (daemonStatuses.count == 0 && [combined[@"runtimeVersion"] isKindOfClass:[NSString class]]) {
+        [lines insertObject:@"A legacy single-daemon status record was found. Reinstall the 0.1.4 package and perform a userspace reboot." atIndex:0];
     }
     return [lines componentsJoinedByString:@"\n"];
 }
@@ -345,7 +368,11 @@ static UILabel *VCamMakeLabel(NSString *text, UIFont *font, UIColor *color) {
         // Keep only the currently selected import to avoid filling Media with old videos.
         for (NSString *existingName in [fileManager contentsOfDirectoryAtPath:directory error:nil]) {
             NSString *existingPath = [directory stringByAppendingPathComponent:existingName];
-            if (![existingName isEqualToString:@"settings.plist"] && ![existingPath isEqualToString:destination]) {
+            BOOL isRuntimeStatus = [existingName hasPrefix:@"runtime-status-"] &&
+                                   [existingName hasSuffix:@".plist"];
+            if (![existingName isEqualToString:@"settings.plist"] &&
+                !isRuntimeStatus &&
+                ![existingPath isEqualToString:destination]) {
                 [fileManager removeItemAtPath:existingPath error:nil];
             }
         }
