@@ -44,7 +44,6 @@ static void VCamRegisterVolumeDirection(NSInteger direction) {
     }
 
     if (shouldToggle) {
-        NSLog(@"[VCam] Volume-button chord detected; toggling menu");
         dispatch_async(dispatch_get_main_queue(), ^{
             [VCamMenuPresenter toggleMenu];
         });
@@ -60,7 +59,6 @@ static void VCamObservePhysicalButtonEvent(UIPressesEvent *event) {
         NSInteger type = (NSInteger)press.type;
         if (type != 102 && type != 103) continue;
 
-        NSLog(@"[VCam] Physical volume event: type=%ld force=%.2f", (long)type, (double)press.force);
         if (press.force <= 0.0) continue;
 
         if (type == 102) VCamRegisterVolumeDirection(1);
@@ -77,6 +75,3 @@ static void VCamObservePhysicalButtonEvent(UIPressesEvent *event) {
 
 %end
 
-%ctor {
-    NSLog(@"[VCam] SpringBoard menu/volume hook loaded");
-}

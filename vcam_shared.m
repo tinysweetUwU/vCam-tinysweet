@@ -6,12 +6,13 @@
 
 NSString * const VCamPreferenceDomain = @"com.tinysweet.vcamios";
 NSString * const VCamMediaPathKey = @"MediaPath";
+NSString * const VCamMediaTypeKey = @"MediaType";
 NSString * const VCamEnabledKey = @"Enabled";
 NSString * const VCamOffsetXKey = @"OffsetX";
 NSString * const VCamOffsetYKey = @"OffsetY";
 NSString * const VCamRotationKey = @"Rotation";
 NSString * const VCamZoomKey = @"Zoom";
-NSString * const VCamRuntimeVersion = @"0.1.6";
+NSString * const VCamRuntimeVersion = @"0.1.7";
 
 static NSString *VCamPreferencesFilePath(void) {
     return [VCamMediaDirectory() stringByAppendingPathComponent:@"settings.plist"];
@@ -234,5 +235,5 @@ void VCamResetRuntimeStatus(void) {
 }
 
 NSString *VCamMediaDirectory(void) {
-    return @"/tmp/VCam";
+    return @"/var/mobile/Media/VCam";
 }

@@ -4,6 +4,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 FOUNDATION_EXPORT NSString * const VCamPreferenceDomain;
 FOUNDATION_EXPORT NSString * const VCamMediaPathKey;
+FOUNDATION_EXPORT NSString * const VCamMediaTypeKey;
 FOUNDATION_EXPORT NSString * const VCamEnabledKey;
 FOUNDATION_EXPORT NSString * const VCamOffsetXKey;
 FOUNDATION_EXPORT NSString * const VCamOffsetYKey;
