@@ -196,8 +196,15 @@ static UILabel *VCamMakeLabel(NSString *text, UIFont *font, UIColor *color) {
     header.axis = UILayoutConstraintAxisHorizontal;
     header.alignment = UIStackViewAlignmentCenter;
     header.spacing = 8;
+    UIStackView *titleGroup = [[UIStackView alloc] init];
+    titleGroup.axis = UILayoutConstraintAxisVertical;
+    titleGroup.alignment = UIStackViewAlignmentLeading;
+    titleGroup.spacing = 1;
     UILabel *title = VCamMakeLabel(@"VCam", [UIFont systemFontOfSize:22 weight:UIFontWeightBold], UIColor.whiteColor);
-    [header addArrangedSubview:title];
+    UILabel *byline = VCamMakeLabel(@"by tinysweet", [UIFont systemFontOfSize:11 weight:UIFontWeightMedium], [UIColor colorWithWhite:1 alpha:0.58]);
+    [titleGroup addArrangedSubview:title];
+    [titleGroup addArrangedSubview:byline];
+    [header addArrangedSubview:titleGroup];
     [header addArrangedSubview:[[UIView alloc] init]];
     UIButton *close = VCamMakeButton(@"✕", [UIColor colorWithWhite:1 alpha:0.12], self, @selector(closeMenu));
     [close.widthAnchor constraintEqualToConstant:42].active = YES;
@@ -276,6 +283,9 @@ static UILabel *VCamMakeLabel(NSString *text, UIFont *font, UIColor *color) {
     _floatingControl.frame = CGRectMake(UIScreen.mainScreen.bounds.size.width - 52.0,
                                         UIScreen.mainScreen.bounds.size.height * 0.68,
                                         38.0, 38.0);
+    // Keep the floating Control button hidden after startup. Users can show it
+    // explicitly from the main VCam menu using the Show Control button.
+    _floatingControl.hidden = YES;
     [_floatingControl addTarget:self action:@selector(toggleFloatingPanel) forControlEvents:UIControlEventTouchUpInside];
     UILongPressGestureRecognizer *openMenuPress = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(openMainMenuFromControl:)];
     openMenuPress.minimumPressDuration = 0.65;

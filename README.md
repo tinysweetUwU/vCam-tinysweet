@@ -1,8 +1,8 @@
-# VCam iOS 0.1.21
+# VCam iOS 0.1.22
 
 Virtual camera replacement for iOS.
 
-- Replace front and rear camera preview with a selected photo or video.
+- Replace camera preview with a selected photo or video.
 - Adjust position, zoom, and rotation.
 - Play and pause video replacements.
-- Control replacement from a floating on-screen panel.
+- Show optional on-screen controls from the VCam menu.
