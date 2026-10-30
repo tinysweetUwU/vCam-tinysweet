@@ -3,6 +3,11 @@
 #import <notify.h>
 #import <time.h>
 #import <dispatch/dispatch.h>
+#import <dlfcn.h>
+#import <errno.h>
+#import <limits.h>
+#import <stdlib.h>
+#import <string.h>
 
 NSString * const VCamPreferenceDomain = @"com.tinysweet.vcamios";
 NSString * const VCamMediaPathKey = @"MediaPath";
@@ -13,7 +18,84 @@ NSString * const VCamOffsetYKey = @"OffsetY";
 NSString * const VCamRotationKey = @"Rotation";
 NSString * const VCamZoomKey = @"Zoom";
 NSString * const VCamVideoPausedKey = @"VideoPaused";
-NSString * const VCamRuntimeVersion = @"0.1.16";
+NSString * const VCamMediaSandboxTokenKey = @"MediaSandboxToken";
+NSString * const VCamMediaSandboxStateKey = @"MediaSandboxState";
+NSString * const VCamRuntimeVersion = @"0.1.17";
+
+// The camera daemon has its own Apple sandbox. A world-readable file under
+// /var/mobile/Media is not automatically readable by mediaserverd; the
+// SpringBoard process must issue a scoped media-read extension and the camera
+// daemon must consume it before opening the file.
+typedef char *(*VCamSandboxIssueFileFunction)(const char *, const char *, uint32_t);
+typedef int64_t (*VCamSandboxConsumeFunction)(const char *);
+typedef int (*VCamSandboxReleaseFunction)(int64_t);
+
+static void *VCamSandboxSymbol(const char *name) {
+    void *symbol = dlsym(RTLD_DEFAULT, name);
+    if (symbol) return symbol;
+
+    static void *sandboxLibrary = NULL;
+    static dispatch_once_t sandboxLibraryOnce;
+    dispatch_once(&sandboxLibraryOnce, ^{
+        sandboxLibrary = dlopen("/usr/lib/system/libsystem_sandbox.dylib", RTLD_NOW | RTLD_LOCAL);
+        if (!sandboxLibrary) sandboxLibrary = dlopen("libsystem_sandbox.dylib", RTLD_NOW | RTLD_LOCAL);
+    });
+    return sandboxLibrary ? dlsym(sandboxLibrary, name) : NULL;
+}
+
+NSString *VCamIssueMediaReadExtension(NSString *path, NSString **errorOut) {
+    if (errorOut) *errorOut = nil;
+    if (path.length == 0) {
+        if (errorOut) *errorOut = @"Empty media path";
+        return nil;
+    }
+
+    VCamSandboxIssueFileFunction issue = (VCamSandboxIssueFileFunction)VCamSandboxSymbol("sandbox_extension_issue_file");
+    if (!issue) {
+        if (errorOut) *errorOut = @"sandbox_extension_issue_file is unavailable in this process";
+        return nil;
+    }
+
+    char *canonicalPath = realpath(path.fileSystemRepresentation, NULL);
+    if (!canonicalPath) {
+        int savedErrno = errno;
+        if (errorOut) *errorOut = [NSString stringWithFormat:@"realpath failed (errno %d: %s)", savedErrno, strerror(savedErrno)];
+        return nil;
+    }
+
+    errno = 0;
+    // This is the read-only extension class consumed by mediaserverd for
+    // client-selected media. Keep the grant scoped to the selected file.
+    char *rawToken = issue("com.apple.mediaserverd.read", canonicalPath, 0);
+    int savedErrno = errno;
+    free(canonicalPath);
+    if (!rawToken) {
+        if (errorOut) *errorOut = [NSString stringWithFormat:@"Could not issue com.apple.mediaserverd.read extension (errno %d: %s)", savedErrno, strerror(savedErrno)];
+        return nil;
+    }
+
+    NSString *token = [NSString stringWithUTF8String:rawToken];
+    free(rawToken);
+    if (token.length == 0) {
+        if (errorOut) *errorOut = @"Sandbox extension API returned an empty token";
+        return nil;
+    }
+    return token;
+}
+
+int64_t VCamConsumeMediaReadExtension(NSString *token) {
+    if (token.length == 0) return -1;
+    VCamSandboxConsumeFunction consume = (VCamSandboxConsumeFunction)VCamSandboxSymbol("sandbox_extension_consume");
+    if (!consume) { errno = ENOSYS; return -1; }
+    errno = 0;
+    return consume(token.UTF8String);
+}
+
+void VCamReleaseMediaReadExtension(int64_t handle) {
+    if (handle < 0) return;
+    VCamSandboxReleaseFunction releaseExtension = (VCamSandboxReleaseFunction)VCamSandboxSymbol("sandbox_extension_release");
+    if (releaseExtension) releaseExtension(handle);
+}
 
 static NSString *VCamPreferencesFilePath(void) {
     return [VCamMediaDirectory() stringByAppendingPathComponent:@"settings.plist"];

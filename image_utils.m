@@ -7,6 +7,11 @@
 #import <QuartzCore/QuartzCore.h>
 #import <math.h>
 #import <ImageIO/ImageIO.h>
+#import <errno.h>
+#import <fcntl.h>
+#import <string.h>
+#import <sys/stat.h>
+#import <unistd.h>
 
 // Shared with the SpringBoard menu through settings.plist.
 typedef NS_ENUM(NSUInteger, VCamMode) {
@@ -38,6 +43,8 @@ static BOOL sIsLoading = NO;
 static NSString *sRequestedPath = nil;
 static NSString *sLoadedPath = nil;
 static BOOL sHasLoggedFirstRender = NO;
+static int64_t sMediaSandboxExtensionHandle = -1;
+static NSString *sConsumedMediaSandboxToken = nil;
 
 static void VCamEnsureState(void) {
     dispatch_once(&sLockOnce, ^{
@@ -171,6 +178,74 @@ static BOOL VCamPrepareVideo(NSString *path,
     return YES;
 }
 
+static BOOL VCamActivateMediaReadAccess(NSString *path) {
+    NSString *token = VCamCopySetting(VCamMediaSandboxTokenKey);
+    if (![token isKindOfClass:NSString.class] || token.length == 0) {
+        NSString *publishedState = VCamCopySetting(VCamMediaSandboxStateKey) ?: @"not-published";
+        VCamSetRuntimeStatus(@"mediaSandboxState", @"missing-token");
+        VCamSetRuntimeStatus(@"mediaSandboxDetail", [NSString stringWithFormat:@"No sandbox token was published by SpringBoard (state: %@)", publishedState]);
+        return NO;
+    }
+
+    @synchronized (sLock ?: [VCamMediaSandboxTokenKey class]) {
+        if (sMediaSandboxExtensionHandle >= 0 && [sConsumedMediaSandboxToken isEqualToString:token]) {
+            VCamSetRuntimeStatus(@"mediaSandboxState", @"consumed");
+            return YES;
+        }
+
+        int64_t newHandle = VCamConsumeMediaReadExtension(token);
+        if (newHandle < 0) {
+            int savedErrno = errno;
+            VCamSetRuntimeStatus(@"mediaSandboxState", @"consume-failed");
+            VCamSetRuntimeStatus(@"mediaSandboxDetail", [NSString stringWithFormat:@"sandbox_extension_consume failed (errno %d: %s)", savedErrno, strerror(savedErrno)]);
+            return NO;
+        }
+
+        if (sMediaSandboxExtensionHandle >= 0) {
+            VCamReleaseMediaReadExtension(sMediaSandboxExtensionHandle);
+        }
+        sMediaSandboxExtensionHandle = newHandle;
+        sConsumedMediaSandboxToken = [token copy];
+        VCamSetRuntimeStatus(@"mediaSandboxState", @"consumed");
+        VCamSetRuntimeStatus(@"mediaSandboxDetail", @"com.apple.mediaserverd.read extension consumed by mediaserverd");
+        return YES;
+    }
+}
+
+static BOOL VCamOpenSelectedMediaForRead(NSString *path) {
+    if (path.length == 0) {
+        VCamSetRuntimeStatus(@"mediaState", @"file-not-readable");
+        VCamSetRuntimeStatus(@"mediaDetail", @"The selected media path is empty");
+        return NO;
+    }
+
+    BOOL extensionReady = VCamActivateMediaReadAccess(path);
+    errno = 0;
+    int descriptor = open(path.fileSystemRepresentation, O_RDONLY | O_CLOEXEC);
+    if (descriptor < 0) {
+        int savedErrno = errno;
+        NSString *sandboxState = VCamCopySetting(VCamMediaSandboxStateKey) ?: @"unknown";
+        VCamSetRuntimeStatus(@"mediaState", @"file-not-readable");
+        VCamSetRuntimeStatus(@"mediaFileOpenErrno", @(savedErrno));
+        VCamSetRuntimeStatus(@"mediaDetail", [NSString stringWithFormat:@"open() failed (errno %d: %s); sandbox extension %@; path %@", savedErrno, strerror(savedErrno), sandboxState, path]);
+        return NO;
+    }
+
+    struct stat fileInfo;
+    BOOL regularFile = fstat(descriptor, &fileInfo) == 0 && S_ISREG(fileInfo.st_mode);
+    close(descriptor);
+    if (!regularFile) {
+        VCamSetRuntimeStatus(@"mediaState", @"invalid-file");
+        VCamSetRuntimeStatus(@"mediaDetail", @"The selected media path is readable but is not a regular file");
+        return NO;
+    }
+
+    VCamSetRuntimeStatus(@"mediaFileOpenErrno", @0);
+    VCamSetRuntimeStatus(@"mediaFileSize", @((unsigned long long)fileInfo.st_size));
+    VCamSetRuntimeStatus(@"mediaSandboxState", extensionReady ? @"consumed-and-readable" : @"readable-without-extension");
+    return YES;
+}
+
 static BOOL VCamDecodeMedia(NSString *path,
                             UIImage **imageOut,
                             AVPlayer **playerOut,
@@ -183,13 +258,7 @@ static BOOL VCamDecodeMedia(NSString *path,
     if (observerOut) *observerOut = nil;
     if (preferredTransformOut) *preferredTransformOut = CGAffineTransformIdentity;
 
-    NSFileManager *fileManager = NSFileManager.defaultManager;
-    if (path.length == 0 || ![fileManager fileExistsAtPath:path] || ![fileManager isReadableFileAtPath:path]) {
-        NSString *message = [NSString stringWithFormat:@"Camera service cannot read the selected media file: %@", path ?: @"<empty path>"];
-        VCamSetRuntimeStatus(@"mediaState", @"file-not-readable");
-        VCamSetRuntimeStatus(@"mediaDetail", message);
-        return NO;
-    }
+    if (!VCamOpenSelectedMediaForRead(path)) return NO;
 
     NSString *extension = path.pathExtension.lowercaseString;
     NSSet *videoExtensions = [NSSet setWithArray:@[@"mp4", @"mov", @"m4v", @"3gp", @"3g2", @"avi", @"mts", @"m2ts", @"qt"]];
@@ -294,6 +363,7 @@ void loadReplacementMedia(void) {
                     VCamStopVideoPlaybackLocked();
                     return;
                 }
+                sRequestedPath = nil;
                 if (image) {
                     sReplacementImage = image;
                     sCurrentMode = VCamModeImage;

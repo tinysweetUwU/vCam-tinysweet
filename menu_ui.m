@@ -482,11 +482,14 @@ static UILabel *VCamMakeLabel(NSString *text, UIFont *font, UIColor *color) {
         frameLine,
         enabledLine,
         selectionLine,
+        [NSString stringWithFormat:@"Media sandbox access: %@", ([[runtime[@"mediaSandboxState"] description] uppercaseString] ?: @"WAITING")],
         mediaLine,
         outputLine,
         @"Camera coverage: front and rear live preview streams"
     ]];
     if (hookDetail.length) [lines addObject:[@"Hook detail: " stringByAppendingString:hookDetail]];
+    NSString *sandboxDetail = [runtime[@"mediaSandboxDetail"] isKindOfClass:NSString.class] ? runtime[@"mediaSandboxDetail"] : @"";
+    if (sandboxDetail.length) [lines addObject:[@"Sandbox detail: " stringByAppendingString:sandboxDetail]];
     if (renderError.length) [lines addObject:[@"Render error: " stringByAppendingString:renderError]];
 
     if (!mediaLoaded) {
@@ -499,8 +502,10 @@ static UILabel *VCamMakeLabel(NSString *text, UIFont *font, UIColor *color) {
         [lines addObject:@"Action: enable Replacement."];
     } else if ([mediaState isEqualToString:@"no-selection"]) {
         [lines addObject:@"Action: choose a photo or video."];
-    } else if ([mediaState containsString:@"failed"] || [mediaState containsString:@"not-readable"] || [mediaState containsString:@"not-found"] || [mediaState containsString:@"missing"]) {
-        [lines addObject:@"Action: choose the media again. Check that the shared media file is readable."];
+    } else if ([mediaState isEqualToString:@"file-not-readable"]) {
+        [lines addObject:@"Action: inspect Media sandbox access and Sandbox detail; errno identifies the denied operation."];
+    } else if ([mediaState containsString:@"failed"] || [mediaState containsString:@"not-found"] || [mediaState containsString:@"missing"]) {
+        [lines addObject:@"Action: choose the media again and check the detailed Media and Sandbox status."];
     } else if (!rendered) {
         [lines addObject:@"Action: wait for the camera frame to be replaced, then check Media above."];
     } else {
@@ -634,6 +639,10 @@ static UILabel *VCamMakeLabel(NSString *text, UIFont *font, UIColor *color) {
             return;
         }
 
+        NSString *sandboxError = nil;
+        NSString *sandboxToken = VCamIssueMediaReadExtension(destination, &sandboxError);
+        VCamSetSetting(VCamMediaSandboxTokenKey, sandboxToken);
+        VCamSetSetting(VCamMediaSandboxStateKey, sandboxToken ? @"issued" : [NSString stringWithFormat:@"issue-failed: %@", sandboxError ?: @"unknown error"]);
         VCamSetSetting(VCamMediaTypeKey, [typeIdentifier isEqualToString:VCamMovieTypeIdentifier] ? @"video" : @"image");
         VCamSetSetting(VCamVideoPausedKey, @NO);
         VCamSetSetting(VCamMediaPathKey, destination);
@@ -649,7 +658,9 @@ static UILabel *VCamMakeLabel(NSString *text, UIFont *font, UIColor *color) {
         if (!VCamCopySetting(VCamRotationKey)) VCamSetSetting(VCamRotationKey, @0);
 
         dispatch_async(dispatch_get_main_queue(), ^{
-            self->_statusLabel.text = @"Media imported · Original file preserved";
+            self->_statusLabel.text = sandboxToken
+                ? @"Media imported · Camera read access granted"
+                : [NSString stringWithFormat:@"Media imported · Camera permission failed: %@", sandboxError ?: @"unknown error"];
             [self refreshStatus];
             [self updateVideoButton];
         });
