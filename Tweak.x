@@ -1,28 +1,35 @@
 #import "image_utils.h"
 #import "vcam_shared.h"
 #import <objc/message.h>
+#import <objc/runtime.h>
+#import <dlfcn.h>
+#import <dispatch/dispatch.h>
 
-%ctor {
-    NSLog(@"[VCam] mediaserverd tweak loaded; shared media directory=%@", VCamMediaDirectory());
-}
-
-static dispatch_once_t sVCamFirstOutputLog;
-static dispatch_once_t sVCamFirstVideoLog;
+// BWNodeOutput is declared by Apple's private CMCapture framework. On some
+// iOS builds it is not registered when mediaserverd first loads third-party
+// tweaks. Load CMCapture explicitly, then install the Logos group only after
+// the class and selector are confirmed to exist.
+%group VCamCaptureHooks
 
 %hook BWNodeOutput
 
 - (void)emitSampleBuffer:(CMSampleBufferRef)sampleBuffer {
     unsigned int mediaType = ((unsigned int (*)(id, SEL))objc_msgSend)(self, sel_registerName("mediaType"));
-    dispatch_once(&sVCamFirstOutputLog, ^{
-        NSLog(@"[VCam] BWNodeOutput hook received a sample; mediaType=0x%08x", mediaType);
-    });
     if (mediaType != 'vide') {
         %orig(sampleBuffer);
         return;
     }
 
-    dispatch_once(&sVCamFirstVideoLog, ^{
-        NSLog(@"[VCam] video sample buffers observed; replacement hook is active");
+    static dispatch_once_t sFirstVideoBuffer;
+    dispatch_once(&sFirstVideoBuffer, ^{
+        CVPixelBufferRef firstBuffer = CMSampleBufferGetImageBuffer(sampleBuffer);
+        NSString *dimensions = firstBuffer
+            ? [NSString stringWithFormat:@"%zux%zu", CVPixelBufferGetWidth(firstBuffer), CVPixelBufferGetHeight(firstBuffer)]
+            : @"unavailable";
+        VCamSetRuntimeStatus(@"cameraFramesSeen", @YES);
+        VCamSetRuntimeStatus(@"firstCameraFrameAt", [NSDate date]);
+        VCamSetRuntimeStatus(@"cameraFrameSize", dimensions);
+        NSLog(@"[VCam] first video frame reached BWNodeOutput (%@)", dimensions);
     });
 
     CVPixelBufferRef imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer);
@@ -37,6 +44,7 @@ static dispatch_once_t sVCamFirstVideoLog;
         @try {
             drawReplacementOntoBuffer(imageBuffer);
         } @catch (NSException *exception) {
+            VCamSetRuntimeStatus(@"renderError", exception.reason ?: @"Unknown render exception");
             NSLog(@"[VCam] Failed to render replacement media: %@", exception);
         } @finally {
             CVPixelBufferUnlockBaseAddress(imageBuffer, 0);
@@ -47,3 +55,63 @@ static dispatch_once_t sVCamFirstVideoLog;
 }
 
 %end
+%end
+
+static void *sCMCaptureHandle = NULL;
+static BOOL sVCamHookInstalled = NO;
+static NSUInteger sVCamHookAttempts = 0;
+
+static void VCamTryInstallCaptureHook(void) {
+    if (sVCamHookInstalled) return;
+    sVCamHookAttempts++;
+
+    if (!sCMCaptureHandle) {
+        sCMCaptureHandle = dlopen("/System/Library/PrivateFrameworks/CMCapture.framework/CMCapture", RTLD_NOW | RTLD_GLOBAL);
+        if (!sCMCaptureHandle) {
+            // Keep the fallback for OS builds exposing the framework through a different dyld path.
+            sCMCaptureHandle = dlopen("/System/Library/PrivateFrameworks/CMCapture.framework", RTLD_NOW | RTLD_GLOBAL);
+        }
+    }
+
+    Class outputClass = objc_getClass("BWNodeOutput");
+    SEL outputSelector = sel_registerName("emitSampleBuffer:");
+    Method outputMethod = outputClass ? class_getInstanceMethod(outputClass, outputSelector) : NULL;
+
+    if (outputClass && outputMethod) {
+        %init(VCamCaptureHooks);
+        sVCamHookInstalled = YES;
+        VCamSetRuntimeStatus(@"hookState", @"installed");
+        VCamSetRuntimeStatus(@"hookInstalledAt", [NSDate date]);
+        VCamSetRuntimeStatus(@"hookAttempts", @(sVCamHookAttempts));
+        NSLog(@"[VCam] installed BWNodeOutput emitSampleBuffer: hook from CMCapture");
+        return;
+    }
+
+    NSString *state = outputClass ? @"selector-not-found" : @"class-not-found";
+    VCamSetRuntimeStatus(@"hookState", state);
+    VCamSetRuntimeStatus(@"hookAttempts", @(sVCamHookAttempts));
+    if (!outputClass) {
+        const char *error = dlerror();
+        VCamSetRuntimeStatus(@"hookDetail", error ? [NSString stringWithUTF8String:error] : @"BWNodeOutput is not registered yet");
+    } else {
+        VCamSetRuntimeStatus(@"hookDetail", @"BWNodeOutput exists but emitSampleBuffer: is missing");
+    }
+
+    // Retry while mediaserverd is still bringing up its camera framework stack.
+    if (sVCamHookAttempts < 30) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(NSEC_PER_SEC)),
+                       dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            VCamTryInstallCaptureHook();
+        });
+    } else {
+        VCamSetRuntimeStatus(@"hookState", @"failed");
+    }
+}
+
+%ctor {
+    @autoreleasepool {
+        VCamResetRuntimeStatus();
+        NSLog(@"[VCam] mediaserverd tweak loaded; CMCapture hook installation starting");
+        VCamTryInstallCaptureHook();
+    }
+}

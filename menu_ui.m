@@ -46,8 +46,10 @@ static UILabel *VCamMakeLabel(NSString *text, UIFont *font, UIColor *color) {
 
 @implementation VCamMenuViewController {
     UILabel *_statusLabel;
+    UILabel *_diagnosticLabel;
     UIButton *_toggleButton;
     UIView *_panel;
+    NSTimer *_diagnosticTimer;
 }
 
 - (void)viewDidLoad {
@@ -123,6 +125,18 @@ static UILabel *VCamMakeLabel(NSString *text, UIFont *font, UIColor *color) {
     _statusLabel = VCamMakeLabel(@"No replacement media selected", [UIFont systemFontOfSize:13], [UIColor colorWithWhite:1 alpha:0.72]);
     [stack addArrangedSubview:_statusLabel];
 
+    [stack addArrangedSubview:VCamMakeLabel(@"Camera status", [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold], UIColor.whiteColor)];
+    _diagnosticLabel = VCamMakeLabel(@"Checking camera service…", [UIFont monospacedSystemFontOfSize:11 weight:UIFontWeightRegular], [UIColor colorWithWhite:1 alpha:0.82]);
+    _diagnosticLabel.numberOfLines = 0;
+    _diagnosticLabel.backgroundColor = [UIColor colorWithWhite:0 alpha:0.20];
+    _diagnosticLabel.layer.cornerRadius = 10;
+    _diagnosticLabel.layer.masksToBounds = YES;
+    _diagnosticLabel.layoutMargins = UIEdgeInsetsMake(8, 8, 8, 8);
+    [stack addArrangedSubview:_diagnosticLabel];
+
+    UIButton *copyDiagnostics = VCamMakeButton(@"Copy diagnostics", [UIColor colorWithWhite:1 alpha:0.12], self, @selector(copyDiagnostics));
+    [stack addArrangedSubview:copyDiagnostics];
+
     UIButton *chooseButton = VCamMakeButton(@"Choose Photo / Video", [UIColor colorWithRed:0.20 green:0.42 blue:0.86 alpha:1], self, @selector(chooseMedia));
     [stack addArrangedSubview:chooseButton];
 
@@ -179,19 +193,91 @@ static UILabel *VCamMakeLabel(NSString *text, UIFont *font, UIColor *color) {
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
     [self refreshStatus];
+    [_diagnosticTimer invalidate];
+    _diagnosticTimer = [NSTimer scheduledTimerWithTimeInterval:1.0
+                                                       target:self
+                                                     selector:@selector(refreshStatusTimer:)
+                                                     userInfo:nil
+                                                      repeats:YES];
+}
+
+- (void)viewWillDisappear:(BOOL)animated {
+    [super viewWillDisappear:animated];
+    [_diagnosticTimer invalidate];
+    _diagnosticTimer = nil;
+}
+
+- (NSString *)diagnosticText {
+    NSDictionary *runtime = VCamCopyRuntimeStatus();
+    NSString *version = runtime[@"runtimeVersion"];
+    BOOL isCurrentRuntime = [version isEqualToString:VCamRuntimeVersion];
+    BOOL daemonLoaded = isCurrentRuntime && [runtime[@"daemonLoaded"] boolValue];
+    NSString *hookState = [runtime[@"hookState"] isKindOfClass:[NSString class]] ? runtime[@"hookState"] : @"unknown";
+    BOOL framesSeen = [runtime[@"cameraFramesSeen"] boolValue];
+    BOOL rendered = [runtime[@"replacementRendered"] boolValue];
+    NSString *mediaState = [runtime[@"mediaState"] isKindOfClass:[NSString class]] ? runtime[@"mediaState"] : @"not-checked";
+    NSString *mediaDetail = [runtime[@"mediaDetail"] isKindOfClass:[NSString class]] ? runtime[@"mediaDetail"] : @"";
+    NSString *hookDetail = [runtime[@"hookDetail"] isKindOfClass:[NSString class]] ? runtime[@"hookDetail"] : @"";
+    NSString *renderError = [runtime[@"renderError"] isKindOfClass:[NSString class]] ? runtime[@"renderError"] : @"";
+
+    NSString *daemonLine = daemonLoaded ? @"Daemon injection: YES" : @"Daemon injection: NO / no heartbeat";
+    NSString *hookLine = [NSString stringWithFormat:@"BWNodeOutput hook: %@", hookState.uppercaseString];
+    NSString *frameLine = framesSeen
+        ? [NSString stringWithFormat:@"Camera frames: RECEIVED (%@)", runtime[@"cameraFrameSize"] ?: @"size unknown"]
+        : @"Camera frames: WAITING (open Camera app and start preview)";
+    NSString *mediaLine = [NSString stringWithFormat:@"Media: %@%@", mediaState.uppercaseString,
+                           mediaDetail.length ? [@" — " stringByAppendingString:mediaDetail] : @""];
+    NSString *outputLine = rendered
+        ? [NSString stringWithFormat:@"Buffer render call: SENT (%@)", runtime[@"renderedFrameSize"] ?: @"size unknown"]
+        : @"Buffer render call: NOT SENT YET";
+
+    NSMutableArray<NSString *> *lines = [NSMutableArray arrayWithArray:@[daemonLine, hookLine, frameLine, mediaLine, outputLine]];
+    if (hookDetail.length) [lines addObject:[@"Hook detail: " stringByAppendingString:hookDetail]];
+    if (renderError.length) [lines addObject:[@"Render error: " stringByAppendingString:renderError]];
+    if (!daemonLoaded) {
+        [lines addObject:@"Action: install the correct rootless/RootHide package, then perform a userspace reboot. The menu alone does not mean the camera daemon tweak is loaded."];
+    } else if (![hookState isEqualToString:@"installed"]) {
+        [lines addObject:@"Action: CMCapture/BWNodeOutput hook did not install. This is the camera-hook stage, not a media-selection issue."];
+    } else if (!framesSeen) {
+        [lines addObject:@"Action: open the built-in Camera app, switch to Video or Photo preview, wait 5 seconds, then reopen this menu."];
+    } else if ([mediaState isEqualToString:@"disabled"]) {
+        [lines addObject:@"Action: tap Enable Replacement, then open Camera and start its preview."];
+    } else if ([mediaState isEqualToString:@"no-selection"]) {
+        [lines addObject:@"Action: choose a photo or video in the menu, then open Camera."];
+    } else if ([mediaState containsString:@"failed"] || [mediaState containsString:@"not-found"] || [mediaState containsString:@"missing"]) {
+        [lines addObject:@"Action: choose the photo/video again. The camera service could not read or decode it."];
+    } else if (!rendered) {
+        [lines addObject:@"Action: the hook sees camera frames, but has not rendered replacement media yet. Check the Media line above."];
+    } else {
+        [lines addObject:@"Status: the camera hook has submitted replacement pixels to the camera buffer. This status does not certify how every receiving app displays that buffer."];
+    }
+    if (!isCurrentRuntime && runtime.count > 0) {
+        [lines insertObject:@"A status record from an older package was found; waiting for the new camera daemon instance." atIndex:0];
+    }
+    return [lines componentsJoinedByString:@"\n"];
+}
+
+- (void)refreshStatusTimer:(NSTimer *)timer {
+    [self refreshStatus];
 }
 
 - (void)refreshStatus {
     NSString *path = VCamCopySetting(VCamMediaPathKey);
     BOOL enabled = [VCamCopySetting(VCamEnabledKey) boolValue];
     if ([path isKindOfClass:[NSString class]] && path.length > 0) {
-        _statusLabel.text = [NSString stringWithFormat:@"Selected: %@%@", path.lastPathComponent, enabled ? @" · Active" : @" · Disabled"];
+        _statusLabel.text = [NSString stringWithFormat:@"Selected: %@ · %@", path.lastPathComponent, enabled ? @"Enabled (awaiting confirmed output)" : @"Disabled"];
     } else {
         _statusLabel.text = @"No replacement media selected";
     }
     [_toggleButton setTitle:(enabled ? @"Disable Replacement" : @"Enable Replacement") forState:UIControlStateNormal];
     _toggleButton.backgroundColor = enabled ? [UIColor colorWithRed:0.66 green:0.25 blue:0.22 alpha:1]
                                             : [UIColor colorWithRed:0.13 green:0.52 blue:0.32 alpha:1];
+    _diagnosticLabel.text = [self diagnosticText];
+}
+
+- (void)copyDiagnostics {
+    UIPasteboard.generalPasteboard.string = [self diagnosticText];
+    _diagnosticLabel.text = [[self diagnosticText] stringByAppendingString:@"\n\nCopied to clipboard."];
 }
 
 - (void)closeMenu { [VCamMenuPresenter hideMenu]; }
