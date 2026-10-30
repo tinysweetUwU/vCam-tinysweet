@@ -69,7 +69,7 @@ static UILabel *VCamMakeLabel(NSString *text, UIFont *font, UIColor *color) {
     UIButton *_logsButton;
     UIButton *_backdrop;
     UIView *_panel;
-    UIView *_logsContainer;
+    UIStackView *_logsContainer;
     VCamPassThroughView *_passThroughView;
     UIButton *_floatingControl;
     UIView *_floatingPanel;
