@@ -388,7 +388,7 @@ void loadReplacementMedia(void) {
         VCamSetRuntimeStatus(@"replacementEnabled", @(sEnabled));
         sOffsetX = MAX(-1.0, MIN(1.0, VCamNumber(VCamCopySetting(VCamOffsetXKey), 0.0)));
         sOffsetY = MAX(-1.0, MIN(1.0, VCamNumber(VCamCopySetting(VCamOffsetYKey), 0.0)));
-        sZoom = MAX(0.5, MIN(3.0, VCamNumber(VCamCopySetting(VCamZoomKey), 1.0)));
+        sZoom = MAX(0.1, MIN(10.0, VCamNumber(VCamCopySetting(VCamZoomKey), 1.0)));
         sRotation = (NSInteger)VCamNumber(VCamCopySetting(VCamRotationKey), 0);
         BOOL videoPaused = [VCamCopySetting(VCamVideoPausedKey) boolValue];
 
@@ -600,8 +600,10 @@ void drawReplacementOntoBuffer(CVPixelBufferRef targetBuffer) {
 
     CGFloat translateX = ((CGFloat)targetWidth - scaledExtent.size.width) / 2.0 - scaledExtent.origin.x;
     CGFloat translateY = ((CGFloat)targetHeight - scaledExtent.size.height) / 2.0 - scaledExtent.origin.y;
+    // Offsets are stored in screen coordinates (UIKit: +X right, +Y down).
+    // Core Image uses a Y-up coordinate system, so invert only Y at render time.
     translateX += offsetXValue * (CGFloat)targetWidth;
-    translateY += offsetYValue * (CGFloat)targetHeight;
+    translateY -= offsetYValue * (CGFloat)targetHeight;
     source = [source imageByApplyingTransform:CGAffineTransformMakeTranslation(translateX, translateY)];
 
     CIImage *background = [[CIImage imageWithColor:[CIColor colorWithRed:0 green:0 blue:0 alpha:1]]

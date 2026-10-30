@@ -71,6 +71,21 @@ static NSUInteger sOverlayInstallAttempts = 0;
 static const CGFloat VCamMoveStep = 0.05;
 static NSString * const VCamMovieTypeIdentifier = @"public.movie";
 static NSString * const VCamImageTypeIdentifier = @"public.image";
+static NSString * const VCamOffsetCoordinateVersionKey = @"OffsetCoordinateVersion";
+
+// Older builds stored Y in Core Image's Y-up coordinate space. New builds
+// store both offsets in screen coordinates (UIKit's Y-down space), so migrate
+// the old Y value once to preserve the current on-screen position.
+static void VCamMigrateOffsetCoordinatesIfNeeded(void) {
+    NSInteger version = [VCamCopySetting(VCamOffsetCoordinateVersionKey) integerValue];
+    if (version >= 1) return;
+
+    id oldYValue = VCamCopySetting(VCamOffsetYKey);
+    if ([oldYValue respondsToSelector:@selector(doubleValue)]) {
+        VCamSetSetting(VCamOffsetYKey, @(-[oldYValue doubleValue]));
+    }
+    VCamSetSetting(VCamOffsetCoordinateVersionKey, @1);
+}
 
 static UIButton *VCamMakeButton(NSString *title, UIColor *background, id target, SEL action) {
     UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -138,6 +153,7 @@ static UILabel *VCamMakeLabel(NSString *text, UIFont *font, UIColor *color) {
 
 - (void)viewDidLoad {
     [super viewDidLoad];
+    VCamMigrateOffsetCoordinatesIfNeeded();
 
     _backdrop = [UIButton buttonWithType:UIButtonTypeCustom];
     _backdrop.translatesAutoresizingMaskIntoConstraints = NO;
@@ -861,10 +877,10 @@ static UILabel *VCamMakeLabel(NSString *text, UIFont *font, UIColor *color) {
     CGFloat value = [VCamCopySetting(VCamOffsetYKey) respondsToSelector:@selector(doubleValue)] ? [VCamCopySetting(VCamOffsetYKey) doubleValue] : 0.0;
     VCamSetSetting(VCamOffsetYKey, @(MAX(-1.0, MIN(1.0, value + delta))));
 }
-// Match the visible arrow direction to the movement of the replacement image.
-// The previous offset signs were inverted on both axes for the camera output.
-- (void)moveLeft { [self adjustOffsetX:VCamMoveStep]; }
-- (void)moveRight { [self adjustOffsetX:-VCamMoveStep]; }
+// Offsets are stored in screen coordinates: +X is right and +Y is down.
+// image_utils converts screen Y to Core Image's Y-up coordinate system.
+- (void)moveLeft { [self adjustOffsetX:-VCamMoveStep]; }
+- (void)moveRight { [self adjustOffsetX:VCamMoveStep]; }
 - (void)moveUp { [self adjustOffsetY:-VCamMoveStep]; }
 - (void)moveDown { [self adjustOffsetY:VCamMoveStep]; }
 - (void)resetPosition { VCamSetSetting(VCamOffsetXKey, @0.0); VCamSetSetting(VCamOffsetYKey, @0.0); }
@@ -879,8 +895,8 @@ static UILabel *VCamMakeLabel(NSString *text, UIFont *font, UIColor *color) {
     NSInteger value = [VCamCopySetting(VCamRotationKey) integerValue];
     VCamSetSetting(VCamRotationKey, @((value - 90 + 360) % 360));
 }
-- (void)zoomIn { CGFloat value = [VCamCopySetting(VCamZoomKey) respondsToSelector:@selector(doubleValue)] ? [VCamCopySetting(VCamZoomKey) doubleValue] : 1.0; VCamSetSetting(VCamZoomKey, @(MIN(3.0, value + 0.1))); }
-- (void)zoomOut { CGFloat value = [VCamCopySetting(VCamZoomKey) respondsToSelector:@selector(doubleValue)] ? [VCamCopySetting(VCamZoomKey) doubleValue] : 1.0; VCamSetSetting(VCamZoomKey, @(MAX(0.5, value - 0.1))); }
+- (void)zoomIn { CGFloat value = [VCamCopySetting(VCamZoomKey) respondsToSelector:@selector(doubleValue)] ? [VCamCopySetting(VCamZoomKey) doubleValue] : 1.0; VCamSetSetting(VCamZoomKey, @(MIN(10.0, value + 0.1))); }
+- (void)zoomOut { CGFloat value = [VCamCopySetting(VCamZoomKey) respondsToSelector:@selector(doubleValue)] ? [VCamCopySetting(VCamZoomKey) doubleValue] : 1.0; VCamSetSetting(VCamZoomKey, @(MAX(0.1, value - 0.1))); }
 @end
 
 @implementation VCamMenuPresenter
