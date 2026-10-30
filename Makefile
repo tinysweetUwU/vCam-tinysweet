@@ -16,6 +16,6 @@ vcam_FRAMEWORKS = Foundation UIKit CoreGraphics CoreVideo AVFoundation CoreMedia
 # The floating control panel and volume-button chord live only in SpringBoard.
 vcam_menu_FILES = Menu.x menu_ui.m vcam_shared.m
 vcam_menu_CFLAGS = -fobjc-arc -Wno-deprecated-declarations
-vcam_menu_FRAMEWORKS = Foundation UIKit PhotosUI QuartzCore
+vcam_menu_FRAMEWORKS = Foundation UIKit PhotosUI QuartzCore AVFoundation CoreMedia
 
 include $(THEOS_MAKE_PATH)/tweak.mk

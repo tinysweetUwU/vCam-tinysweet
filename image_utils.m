@@ -71,6 +71,7 @@ static CGFloat VCamNumber(id value, CGFloat fallback) {
 }
 
 static void VCamStopVideoFramePumpLocked(void);
+static void VCamStopVideoPlaybackLocked(void);
 
 static void VCamStopVideoFramePumpLocked(void) {
     if (sVideoFrameTimer) {
@@ -113,6 +114,27 @@ static void VCamStartVideoFramePumpLocked(void) {
             }
             player = sVideoPlayer;
             output = sVideoOutput;
+        }
+
+        AVPlayerItem *activeItem = player.currentItem;
+        if (player.status == AVPlayerStatusFailed || activeItem.status == AVPlayerItemStatusFailed) {
+            NSString *failureDetail = activeItem.error.localizedDescription ?: player.error.localizedDescription ?: @"AVPlayer reported a playback failure";
+            @synchronized (sLock) {
+                if (sVideoPlayer == player) {
+                    NSString *failedPath = [sLoadedPath copy];
+                    VCamStopVideoPlaybackLocked();
+                    sCurrentMode = VCamModeNone;
+                    // Keep this path marked as handled so a failing codec does not
+                    // trigger an endless reload loop on every camera frame.
+                    sLoadedPath = failedPath;
+                    VCamSetRuntimeStatus(@"videoFramePump", @"player-failed");
+                    VCamSetRuntimeStatus(@"videoPlayerError", failureDetail);
+                    VCamSetRuntimeStatus(@"mediaState", @"video-player-failed");
+                    VCamSetRuntimeStatus(@"mediaDetail", failureDetail);
+                    VCamSetRuntimeStatus(@"replacementRendered", @NO);
+                }
+            }
+            return;
         }
 
         CMTime itemTime = [output itemTimeForHostTime:CACurrentMediaTime()];
@@ -242,7 +264,7 @@ static BOOL VCamPrepareVideo(NSString *path,
     [item addOutput:videoOutput];
     // Keep a small decode-ahead window. The camera render callback consumes
     // cached frames from a separate queue, so AVPlayer can use normal stall recovery.
-    item.preferredForwardBufferDuration = 0.5;
+    item.preferredForwardBufferDuration = 0.25;
 
     AVPlayer *player = [AVPlayer playerWithPlayerItem:item];
     player.muted = YES;
@@ -273,7 +295,7 @@ static BOOL VCamPrepareVideo(NSString *path,
     if (preferredTransformOut) *preferredTransformOut = videoTrack.preferredTransform;
 
     VCamSetRuntimeStatus(@"mediaState", @"loaded-video");
-    VCamSetRuntimeStatus(@"mediaDetail", @"Video player ready; full-resolution frames are streamed in real time");
+    VCamSetRuntimeStatus(@"mediaDetail", @"Video player ready; imported video is normalized to a camera-friendly 1080p/30 FPS stream when supported");
     return YES;
 }
 

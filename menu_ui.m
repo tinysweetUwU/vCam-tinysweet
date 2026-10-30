@@ -1,6 +1,8 @@
 #import "vcam_menu.h"
 #import "vcam_shared.h"
 #import <PhotosUI/PhotosUI.h>
+#import <AVFoundation/AVFoundation.h>
+#import <math.h>
 #import <UIKit/UIKit.h>
 #import <sys/stat.h>
 #import <objc/message.h>
@@ -503,6 +505,7 @@ static UILabel *VCamMakeLabel(NSString *text, UIFont *font, UIColor *color) {
     NSString *fileAccess = [runtime[@"mediaFileAccess"] isKindOfClass:NSString.class] ? [runtime[@"mediaFileAccess"] uppercaseString] : @"WAITING";
     NSString *videoPump = [runtime[@"videoFramePump"] isKindOfClass:NSString.class] ? runtime[@"videoFramePump"] : @"not-active";
     NSString *videoFrameSize = [runtime[@"videoFrameSize"] isKindOfClass:NSString.class] ? runtime[@"videoFrameSize"] : @"waiting";
+    NSString *videoPlayerError = [runtime[@"videoPlayerError"] isKindOfClass:NSString.class] ? runtime[@"videoPlayerError"] : @"";
     NSMutableArray<NSString *> *lines = [NSMutableArray arrayWithArray:@[
         daemonLine,
         [NSString stringWithFormat:@"Camera daemon version: %@", daemonVersion],
@@ -519,6 +522,7 @@ static UILabel *VCamMakeLabel(NSString *text, UIFont *font, UIColor *color) {
     ]];
     if (hookDetail.length) [lines addObject:[@"Hook detail: " stringByAppendingString:hookDetail]];
     if (renderError.length) [lines addObject:[@"Render error: " stringByAppendingString:renderError]];
+    if (videoPlayerError.length) [lines addObject:[@"Video player error: " stringByAppendingString:videoPlayerError]];
     if ([runtime[@"mediaRetryCount"] respondsToSelector:@selector(integerValue)] && [runtime[@"mediaRetryCount"] integerValue] > 0) {
         [lines addObject:[NSString stringWithFormat:@"Media load retries: %@ (next retry in %@s)", runtime[@"mediaRetryCount"], runtime[@"mediaRetryAfterSeconds"] ?: @"?"]];
     }
@@ -535,6 +539,8 @@ static UILabel *VCamMakeLabel(NSString *text, UIFont *font, UIColor *color) {
         [lines addObject:@"Action: choose a photo or video."];
     } else if ([mediaState isEqualToString:@"file-not-readable"]) {
         [lines addObject:@"Action: check Media file access and errno; confirm the camera daemon can open the file under /tmp/VCamMedia."];
+    } else if ([mediaState isEqualToString:@"video-player-failed"]) {
+        [lines addObject:@"Action: video playback was stopped safely. Re-import a compatible video; check Video player error for details."];
     } else if ([mediaState containsString:@"failed"] || [mediaState containsString:@"not-found"] || [mediaState containsString:@"missing"]) {
         [lines addObject:@"Action: choose the media again and check Media file access."];
     } else if (!rendered) {
@@ -622,6 +628,167 @@ static UILabel *VCamMakeLabel(NSString *text, UIFont *font, UIColor *color) {
     }];
 }
 
+- (void)finishImportAtPath:(NSString *)path mediaType:(NSString *)mediaType filename:(NSString *)filename {
+    NSFileManager *fileManager = NSFileManager.defaultManager;
+    VCamSetSetting(VCamMediaTypeKey, mediaType);
+    VCamSetSetting(VCamVideoPausedKey, @NO);
+    VCamSetSetting(VCamMediaPathKey, path);
+    VCamSetSetting(VCamEnabledKey, @YES);
+
+    NSString *directory = VCamMediaDirectory();
+    for (NSString *existingName in [fileManager contentsOfDirectoryAtPath:directory error:nil]) {
+        if (![existingName hasPrefix:@"media-"] || [existingName isEqualToString:filename]) continue;
+        NSString *existingPath = [directory stringByAppendingPathComponent:existingName];
+        [fileManager removeItemAtPath:existingPath error:nil];
+    }
+    if (!VCamCopySetting(VCamZoomKey)) VCamSetSetting(VCamZoomKey, @1.0);
+    if (!VCamCopySetting(VCamOffsetXKey)) VCamSetSetting(VCamOffsetXKey, @0.0);
+    if (!VCamCopySetting(VCamOffsetYKey)) VCamSetSetting(VCamOffsetYKey, @0.0);
+    if (!VCamCopySetting(VCamRotationKey)) VCamSetSetting(VCamRotationKey, @0);
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        self->_statusLabel.text = [mediaType isEqualToString:@"video"]
+            ? @"Video optimized · Ready for camera"
+            : @"Media imported · Ready for camera";
+        [self refreshStatus];
+        [self updateVideoButton];
+    });
+}
+
+- (void)optimizeVideoAtPath:(NSString *)sourcePath
+                 outputPath:(NSString *)outputPath
+                   filename:(NSString *)filename {
+    NSURL *sourceURL = [NSURL fileURLWithPath:sourcePath];
+    AVURLAsset *asset = [AVURLAsset URLAssetWithURL:sourceURL options:@{ AVURLAssetPreferPreciseDurationAndTimingKey: @NO }];
+    NSArray<AVAssetTrack *> *tracks = [asset tracksWithMediaType:AVMediaTypeVideo];
+    AVAssetTrack *videoTrack = tracks.firstObject;
+    NSArray<NSString *> *compatiblePresets = [AVAssetExportSession exportPresetsCompatibleWithAsset:asset];
+
+    NSString *preset = nil;
+    if ([compatiblePresets containsObject:AVAssetExportPreset1920x1080]) {
+        preset = AVAssetExportPreset1920x1080;
+    } else if ([compatiblePresets containsObject:AVAssetExportPreset1280x720]) {
+        preset = AVAssetExportPreset1280x720;
+    }
+
+    if (!videoTrack || !preset || !CMTIME_IS_NUMERIC(asset.duration) || CMTimeGetSeconds(asset.duration) <= 0.0) {
+        [[NSFileManager defaultManager] removeItemAtPath:sourcePath error:nil];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self->_statusLabel.text = @"Video format cannot be optimized for camera";
+            [self refreshStatus];
+        });
+        return;
+    }
+
+    AVAssetExportSession *session = [[AVAssetExportSession alloc] initWithAsset:asset presetName:preset];
+    if (!session) {
+        [[NSFileManager defaultManager] removeItemAtPath:sourcePath error:nil];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self->_statusLabel.text = @"Could not prepare video optimizer";
+            [self refreshStatus];
+        });
+        return;
+    }
+
+    // Normalize rotation and cap the exported stream at 30 fps. This keeps
+    // large/high-frame-rate source clips from making mediaserverd decode and
+    // transform oversized frames on every camera callback.
+    CGRect sourceRect = CGRectApplyAffineTransform(
+        CGRectMake(0.0, 0.0, videoTrack.naturalSize.width, videoTrack.naturalSize.height),
+        videoTrack.preferredTransform);
+    CGFloat renderWidth = fabs(sourceRect.size.width);
+    CGFloat renderHeight = fabs(sourceRect.size.height);
+    if (renderWidth < 2.0 || renderHeight < 2.0) {
+        [[NSFileManager defaultManager] removeItemAtPath:sourcePath error:nil];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self->_statusLabel.text = @"Video dimensions are invalid";
+            [self refreshStatus];
+        });
+        return;
+    }
+
+    CGFloat maxDimension = [preset isEqualToString:AVAssetExportPreset1920x1080] ? 1920.0 : 1280.0;
+    CGFloat downscale = MIN(1.0, maxDimension / MAX(renderWidth, renderHeight));
+    CGFloat outputWidth = floor(renderWidth * downscale / 2.0) * 2.0;
+    CGFloat outputHeight = floor(renderHeight * downscale / 2.0) * 2.0;
+    if (outputWidth < 2.0 || outputHeight < 2.0) {
+        [[NSFileManager defaultManager] removeItemAtPath:sourcePath error:nil];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self->_statusLabel.text = @"Video dimensions are too small to optimize";
+            [self refreshStatus];
+        });
+        return;
+    }
+
+    AVMutableVideoComposition *videoComposition = [AVMutableVideoComposition videoComposition];
+    videoComposition.renderSize = CGSizeMake(outputWidth, outputHeight);
+    videoComposition.frameDuration = CMTimeMake(1, 30);
+    AVMutableVideoCompositionInstruction *instruction = [AVMutableVideoCompositionInstruction videoCompositionInstruction];
+    instruction.timeRange = CMTimeRangeMake(kCMTimeZero, asset.duration);
+    AVMutableVideoCompositionLayerInstruction *layerInstruction =
+        [AVMutableVideoCompositionLayerInstruction videoCompositionLayerInstructionWithAssetTrack:videoTrack];
+    CGAffineTransform preferred = videoTrack.preferredTransform;
+    CGAffineTransform normalizedTransform = CGAffineTransformMake(
+        preferred.a * downscale,
+        preferred.b * downscale,
+        preferred.c * downscale,
+        preferred.d * downscale,
+        (preferred.tx - CGRectGetMinX(sourceRect)) * downscale,
+        (preferred.ty - CGRectGetMinY(sourceRect)) * downscale);
+    [layerInstruction setTransform:normalizedTransform atTime:kCMTimeZero];
+    instruction.layerInstructions = @[layerInstruction];
+    videoComposition.instructions = @[instruction];
+    session.videoComposition = videoComposition;
+
+    AVFileType selectedOutputType = nil;
+    if ([session.supportedFileTypes containsObject:AVFileTypeMPEG4]) {
+        selectedOutputType = AVFileTypeMPEG4;
+        outputPath = [[outputPath stringByDeletingPathExtension] stringByAppendingPathExtension:@"mp4"];
+    } else if ([session.supportedFileTypes containsObject:AVFileTypeQuickTimeMovie]) {
+        selectedOutputType = AVFileTypeQuickTimeMovie;
+        outputPath = [[outputPath stringByDeletingPathExtension] stringByAppendingPathExtension:@"mov"];
+        filename = outputPath.lastPathComponent;
+    } else {
+        [[NSFileManager defaultManager] removeItemAtPath:sourcePath error:nil];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self->_statusLabel.text = @"No compatible video output format is available";
+            [self refreshStatus];
+        });
+        return;
+    }
+
+    NSURL *outputURL = [NSURL fileURLWithPath:outputPath];
+    [[NSFileManager defaultManager] removeItemAtURL:outputURL error:nil];
+    session.outputURL = outputURL;
+    session.outputFileType = selectedOutputType;
+    session.shouldOptimizeForNetworkUse = NO;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        self->_statusLabel.text = [preset isEqualToString:AVAssetExportPreset1920x1080]
+            ? @"Optimizing video · 1080p / 30 FPS…"
+            : @"Optimizing video · 720p / 30 FPS…";
+    });
+
+    [session exportAsynchronouslyWithCompletionHandler:^{
+        NSDictionary *outputAttributes = [[NSFileManager defaultManager] attributesOfItemAtPath:outputPath error:nil];
+        BOOL exported = session.status == AVAssetExportSessionStatusCompleted &&
+            [outputAttributes[NSFileType] isEqualToString:NSFileTypeRegular] &&
+            [outputAttributes[NSFileSize] unsignedLongLongValue] > 0;
+        if (exported) {
+            chmod(outputPath.fileSystemRepresentation, 0644);
+            [[NSFileManager defaultManager] removeItemAtPath:sourcePath error:nil];
+            [self finishImportAtPath:outputPath mediaType:@"video" filename:filename];
+        } else {
+            NSString *reason = session.error.localizedDescription ?: @"Unknown export error";
+            [[NSFileManager defaultManager] removeItemAtPath:outputPath error:nil];
+            [[NSFileManager defaultManager] removeItemAtPath:sourcePath error:nil];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                self->_statusLabel.text = [NSString stringWithFormat:@"Video optimization failed: %@", reason];
+                [self refreshStatus];
+            });
+        }
+    }];
+}
+
 - (void)importProvider:(NSItemProvider *)provider {
     NSString *typeIdentifier = nil;
     if ([provider hasItemConformingToTypeIdentifier:VCamMovieTypeIdentifier]) typeIdentifier = VCamMovieTypeIdentifier;
@@ -670,25 +837,13 @@ static UILabel *VCamMakeLabel(NSString *text, UIFont *font, UIColor *color) {
             return;
         }
 
-        VCamSetSetting(VCamMediaTypeKey, [typeIdentifier isEqualToString:VCamMovieTypeIdentifier] ? @"video" : @"image");
-        VCamSetSetting(VCamVideoPausedKey, @NO);
-        VCamSetSetting(VCamMediaPathKey, destination);
-        VCamSetSetting(VCamEnabledKey, @YES);
-        for (NSString *existingName in [fileManager contentsOfDirectoryAtPath:directory error:nil]) {
-            if (![existingName hasPrefix:@"media-"] || [existingName isEqualToString:filename]) continue;
-            NSString *existingPath = [directory stringByAppendingPathComponent:existingName];
-            [fileManager removeItemAtPath:existingPath error:nil];
+        if ([typeIdentifier isEqualToString:VCamMovieTypeIdentifier]) {
+            NSString *optimizedFilename = [[filename stringByDeletingPathExtension] stringByAppendingString:@"-optimized.mp4"];
+            NSString *optimizedPath = [directory stringByAppendingPathComponent:optimizedFilename];
+            [self optimizeVideoAtPath:destination outputPath:optimizedPath filename:optimizedFilename];
+        } else {
+            [self finishImportAtPath:destination mediaType:@"image" filename:filename];
         }
-        if (!VCamCopySetting(VCamZoomKey)) VCamSetSetting(VCamZoomKey, @1.0);
-        if (!VCamCopySetting(VCamOffsetXKey)) VCamSetSetting(VCamOffsetXKey, @0.0);
-        if (!VCamCopySetting(VCamOffsetYKey)) VCamSetSetting(VCamOffsetYKey, @0.0);
-        if (!VCamCopySetting(VCamRotationKey)) VCamSetSetting(VCamRotationKey, @0);
-
-        dispatch_async(dispatch_get_main_queue(), ^{
-            self->_statusLabel.text = @"Media imported · Ready for camera";
-            [self refreshStatus];
-            [self updateVideoButton];
-        });
     }];
 }
 
@@ -708,8 +863,8 @@ static UILabel *VCamMakeLabel(NSString *text, UIFont *font, UIColor *color) {
 }
 // Match the visible arrow direction to the movement of the replacement image.
 // The previous offset signs were inverted on both axes for the camera output.
-- (void)moveLeft { [self adjustOffsetX:-VCamMoveStep]; }
-- (void)moveRight { [self adjustOffsetX:VCamMoveStep]; }
+- (void)moveLeft { [self adjustOffsetX:VCamMoveStep]; }
+- (void)moveRight { [self adjustOffsetX:-VCamMoveStep]; }
 - (void)moveUp { [self adjustOffsetY:-VCamMoveStep]; }
 - (void)moveDown { [self adjustOffsetY:VCamMoveStep]; }
 - (void)resetPosition { VCamSetSetting(VCamOffsetXKey, @0.0); VCamSetSetting(VCamOffsetYKey, @0.0); }

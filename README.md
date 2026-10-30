@@ -1,5 +1,5 @@
-# VCam iOS 0.1.25
+# VCam iOS 0.1.26
 
-Virtual camera replacement for iOS. Replace the live camera feed with a selected photo or video, with on-screen positioning, rotation, zoom, and playback controls.
+Virtual camera replacement for iOS with photo and video support, image positioning and transform controls, and a floating control panel.
 
 By tinysweet.
