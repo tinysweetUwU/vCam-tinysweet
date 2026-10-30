@@ -112,7 +112,7 @@ static void VCamTryInstallCaptureHook(void) {
     @autoreleasepool {
         VCamResetRuntimeStatus();
         NSString *processName = NSProcessInfo.processInfo.processName;
-        NSLog(@"[VCam] mediaserverd tweak loaded; CMCapture hook installation starting", processName);
+        NSLog(@"[VCam] camera daemon tweak loaded in %@; CMCapture hook installation starting", processName);
         VCamTryInstallCaptureHook();
     }
 }

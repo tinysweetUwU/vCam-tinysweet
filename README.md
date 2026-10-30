@@ -1,4 +1,4 @@
-# VCam iOS 0.1.5
+# VCam iOS 0.1.6
 
 Virtual camera replacement tweak for RootHide / rootless jailbreaks.
 
@@ -8,7 +8,7 @@ Virtual camera replacement tweak for RootHide / rootless jailbreaks.
 - iOS 17.6.1
 - Relaxin RootHide 0.5.6
 
-## Changes in 0.1.5
+## Changes in 0.1.6
 
 - Targets `mediaserverd` as the camera daemon on iOS 17.6.1. The `cameracaptured` target was removed because it was an unverified assumption for this OS version. The upstream VCam implementation documents `mediaserverd` for iOS 15–17.
 - Publishes daemon heartbeat through Darwin `notify` state, which is system-wide and not dependent on SpringBoard and daemon sharing the same `/tmp` sandbox view. The plist remains supplemental diagnostic detail.
@@ -34,3 +34,8 @@ The active front or rear live video feed is replaced when it passes through `med
 ## Diagnostics
 
 Open the VCam menu and use **Copy diagnostics**. The menu reports a live `mediaserverd` heartbeat from Darwin notify, hook state, first frame state, media decode state and first replacement render. No system log extraction is required.
+
+
+### 0.1.6 build fix
+- Fixed an Objective-C format-string warning promoted to an error in the camera-daemon startup log.
+- The startup log now includes the actual process name via `%@`.
