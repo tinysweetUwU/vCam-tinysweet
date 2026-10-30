@@ -7,6 +7,7 @@
     <key>Executables</key>
     <array>
       <string>SpringBoard</string>
+      <string>/System/Library/CoreServices/SpringBoard.app/SpringBoard</string>
     </array>
   </dict>
 </dict>

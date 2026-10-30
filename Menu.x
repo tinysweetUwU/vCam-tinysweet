@@ -86,8 +86,8 @@ static void VCamTryInstallVolumeActionHooks(void) {
         return;
     }
 
-    if (sVolumeHookAttempts < 40) {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(NSEC_PER_SEC / 4)),
+    if (sVolumeHookAttempts < 120) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(NSEC_PER_SEC / 2)),
                        dispatch_get_main_queue(), ^{
             VCamTryInstallVolumeActionHooks();
         });
@@ -99,7 +99,7 @@ static void VCamTryInstallVolumeActionHooks(void) {
 %ctor {
     @autoreleasepool {
         NSLog(@"[VCam] SpringBoard menu tweak loaded");
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(NSEC_PER_SEC / 4)),
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(NSEC_PER_SEC / 2)),
                        dispatch_get_main_queue(), ^{
             VCamTryInstallVolumeActionHooks();
             [VCamMenuPresenter installOverlay];

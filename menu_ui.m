@@ -3,6 +3,8 @@
 #import <PhotosUI/PhotosUI.h>
 #import <UIKit/UIKit.h>
 #import <sys/stat.h>
+#import <objc/message.h>
+#import <objc/runtime.h>
 
 @interface VCamMenuViewController : UIViewController <PHPickerViewControllerDelegate>
 - (void)setMenuVisible:(BOOL)visible;
@@ -62,6 +64,8 @@
 
 static VCamOverlayWindow *sOverlayWindow = nil;
 static BOOL sMenuVisible = NO;
+static BOOL sPendingMenuPresentation = NO;
+static NSUInteger sOverlayInstallAttempts = 0;
 static const CGFloat VCamMoveStep = 0.05;
 static NSString * const VCamMovieTypeIdentifier = @"public.movie";
 static NSString * const VCamImageTypeIdentifier = @"public.image";
@@ -679,44 +683,94 @@ static UILabel *VCamMakeLabel(NSString *text, UIFont *font, UIColor *color) {
 
 @implementation VCamMenuPresenter
 + (void)toggleMenu {
-    if (sMenuVisible) [self hideMenu];
+    if (sMenuVisible || sPendingMenuPresentation) [self hideMenu];
     else [self showMenu];
 }
 
-+ (void)ensureOverlayWindow {
-    if (sOverlayWindow) return;
++ (UIWindowScene *)springBoardWindowScene {
+    Class controllerClass = objc_getClass("SBUIController");
+    if (controllerClass && [controllerClass respondsToSelector:sel_registerName("sharedInstance")]) {
+        id controller = ((id (*)(id, SEL))objc_msgSend)(controllerClass, sel_registerName("sharedInstance"));
+        if ([controller respondsToSelector:sel_registerName("windowScene")]) {
+            id springBoardScene = ((id (*)(id, SEL))objc_msgSend)(controller, sel_registerName("windowScene"));
+            if ([springBoardScene isKindOfClass:UIWindowScene.class]) return springBoardScene;
+        }
+    }
 
-    // SpringBoard owns this detached system overlay, so it remains above
-    // foreground app windows instead of being tied to the Home Screen scene.
-    VCamOverlayWindow *window = [[VCamOverlayWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
-    window.frame = UIScreen.mainScreen.bounds;
+    UIWindowScene *fallback = nil;
+    for (UIScene *candidate in UIApplication.sharedApplication.connectedScenes) {
+        if (![candidate isKindOfClass:UIWindowScene.class]) continue;
+        UIWindowScene *windowScene = (UIWindowScene *)candidate;
+        if (windowScene.activationState == UISceneActivationStateForegroundActive) return windowScene;
+        if (!fallback) fallback = windowScene;
+    }
+    return fallback;
+}
+
++ (BOOL)ensureOverlayWindow {
+    if (sOverlayWindow && sOverlayWindow.windowScene) return YES;
+
+    UIWindowScene *scene = [self springBoardWindowScene];
+    if (!scene) return NO;
+
+    VCamOverlayWindow *window = [[VCamOverlayWindow alloc] initWithWindowScene:scene];
+    window.frame = scene.coordinateSpace.bounds;
     window.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     window.windowLevel = UIWindowLevelAlert - 1.0;
     window.backgroundColor = UIColor.clearColor;
     window.opaque = NO;
     window.rootViewController = [[VCamMenuViewController alloc] init];
     sOverlayWindow = window;
+    NSLog(@"[VCam] Overlay window attached to SpringBoard scene %@", scene);
+    return YES;
+}
+
++ (void)presentOverlayIfReady {
+    if (![self ensureOverlayWindow]) return;
+
+    VCamMenuViewController *controller = (VCamMenuViewController *)sOverlayWindow.rootViewController;
+    (void)controller.view;
+    sOverlayWindow.hidden = NO;
+    [sOverlayWindow makeKeyAndVisible];
+    sOverlayWindow.hidden = NO;
+    [controller setMenuVisible:sPendingMenuPresentation];
+    if (!sPendingMenuPresentation) [sOverlayWindow resignKeyWindow];
+    sPendingMenuPresentation = NO;
 }
 
 + (void)installOverlay {
     dispatch_async(dispatch_get_main_queue(), ^{
-        [self ensureOverlayWindow];
-        [sOverlayWindow makeKeyAndVisible];
-        [(VCamMenuViewController *)sOverlayWindow.rootViewController setMenuVisible:NO];
-        [sOverlayWindow resignKeyWindow];
+        if (![self ensureOverlayWindow]) {
+            if (sOverlayInstallAttempts < 120) {
+                sOverlayInstallAttempts++;
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(NSEC_PER_SEC / 2)),
+                               dispatch_get_main_queue(), ^{
+                    [self installOverlay];
+                });
+            } else {
+                NSLog(@"[VCam] Could not create overlay: SpringBoard window scene unavailable");
+            }
+            return;
+        }
+        sOverlayInstallAttempts = 0;
+        [self presentOverlayIfReady];
     });
 }
 
 + (void)showMenu {
     dispatch_async(dispatch_get_main_queue(), ^{
-        [self ensureOverlayWindow];
-        [sOverlayWindow makeKeyAndVisible];
-        [(VCamMenuViewController *)sOverlayWindow.rootViewController setMenuVisible:YES];
+        sPendingMenuPresentation = YES;
+        if (![self ensureOverlayWindow]) {
+            [self installOverlay];
+            return;
+        }
+        [self presentOverlayIfReady];
     });
 }
 
 + (void)hideMenu {
     dispatch_async(dispatch_get_main_queue(), ^{
+        sPendingMenuPresentation = NO;
         if (!sOverlayWindow) return;
         [(VCamMenuViewController *)sOverlayWindow.rootViewController setMenuVisible:NO];
         [sOverlayWindow resignKeyWindow];
