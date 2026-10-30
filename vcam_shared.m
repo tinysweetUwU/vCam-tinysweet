@@ -13,7 +13,7 @@ NSString * const VCamOffsetYKey = @"OffsetY";
 NSString * const VCamRotationKey = @"Rotation";
 NSString * const VCamZoomKey = @"Zoom";
 NSString * const VCamVideoPausedKey = @"VideoPaused";
-NSString * const VCamRuntimeVersion = @"0.1.11";
+NSString * const VCamRuntimeVersion = @"0.1.12";
 
 static NSString *VCamPreferencesFilePath(void) {
     return [VCamMediaDirectory() stringByAppendingPathComponent:@"settings.plist"];
@@ -97,26 +97,103 @@ static NSString *VCamSettingStateName(NSString *key) {
     return [NSString stringWithFormat:@"%@.setting.%@", VCamPreferenceDomain, key];
 }
 
-// Values 2 and 3 are explicit false/true markers. Zero means the setting has
-// not yet been published by this version and allows migration from settings.plist.
-static BOOL VCamReadPublishedEnabledState(BOOL *enabledOut) {
-    int token = VCamNotifyTokenForName(VCamSettingStateName(VCamEnabledKey));
-    if (token == NOTIFY_TOKEN_INVALID) return NO;
+static NSString *VCamSettingChunkStateName(NSString *key, NSUInteger chunkIndex) {
+    return [NSString stringWithFormat:@"%@.chunk.%lu", VCamSettingStateName(key), (unsigned long)chunkIndex];
+}
 
-    uint64_t state = 0;
-    if (notify_get_state(token, &state) != NOTIFY_STATUS_OK || state < 2) return NO;
-    if (enabledOut) *enabledOut = (state == 3);
+// Darwin notify state is a uint64 value. Store UTF-8 setting values as ordered
+// 8-byte chunks, then publish the byte length last as the commit marker. This
+// transports MediaPath across RootHide process filesystem views without relying
+// on SpringBoard and mediaserverd seeing the same plist file.
+static BOOL VCamReadPublishedStringSetting(NSString *key, NSString **valueOut) {
+    int lengthToken = VCamNotifyTokenForName([VCamSettingStateName(key) stringByAppendingString:@".length"]);
+    if (lengthToken == NOTIFY_TOKEN_INVALID) return NO;
+
+    uint64_t encodedLength = 0;
+    if (notify_get_state(lengthToken, &encodedLength) != NOTIFY_STATUS_OK || encodedLength == 0) return NO;
+    if (encodedLength == UINT64_MAX) {
+        if (valueOut) *valueOut = @"";
+        return YES;
+    }
+    if (encodedLength > 4097) return NO;
+
+    NSUInteger byteLength = (NSUInteger)(encodedLength - 1);
+    NSMutableData *data = [NSMutableData dataWithLength:byteLength];
+    uint8_t *bytes = (uint8_t *)data.mutableBytes;
+    NSUInteger chunkCount = (byteLength + 7) / 8;
+
+    for (NSUInteger chunkIndex = 0; chunkIndex < chunkCount; chunkIndex++) {
+        int token = VCamNotifyTokenForName(VCamSettingChunkStateName(key, chunkIndex));
+        if (token == NOTIFY_TOKEN_INVALID) return NO;
+        uint64_t chunkValue = 0;
+        if (notify_get_state(token, &chunkValue) != NOTIFY_STATUS_OK) return NO;
+        for (NSUInteger byteIndex = 0; byteIndex < 8; byteIndex++) {
+            NSUInteger destinationIndex = chunkIndex * 8 + byteIndex;
+            if (destinationIndex >= byteLength) break;
+            bytes[destinationIndex] = (uint8_t)((chunkValue >> (byteIndex * 8)) & 0xff);
+        }
+    }
+
+    NSString *decoded = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+    if (!decoded) return NO;
+    if (valueOut) *valueOut = decoded;
     return YES;
 }
 
-static void VCamPublishEnabledState(id value) {
-    int token = VCamNotifyTokenForName(VCamSettingStateName(VCamEnabledKey));
-    if (token == NOTIFY_TOKEN_INVALID) return;
-
-    uint64_t state = value && [value boolValue] ? 3 : 2;
-    if (notify_set_state(token, state) == NOTIFY_STATUS_OK) {
-        notify_post(VCamSettingStateName(VCamEnabledKey).UTF8String);
+static void VCamPublishStringSetting(NSString *key, NSString *value) {
+    NSData *data = [(value ?: @"") dataUsingEncoding:NSUTF8StringEncoding];
+    if (!data || data.length > 4096) {
+        NSLog(@"[VCam] setting %@ is too large for shared state", key);
+        return;
     }
+
+    int lengthToken = VCamNotifyTokenForName([VCamSettingStateName(key) stringByAppendingString:@".length"]);
+    if (lengthToken == NOTIFY_TOKEN_INVALID || notify_set_state(lengthToken, UINT64_MAX) != NOTIFY_STATUS_OK) {
+        NSLog(@"[VCam] failed to begin publishing shared setting %@", key);
+        return;
+    }
+
+    const uint8_t *bytes = (const uint8_t *)data.bytes;
+    NSUInteger chunkCount = (data.length + 7) / 8;
+    for (NSUInteger chunkIndex = 0; chunkIndex < chunkCount; chunkIndex++) {
+        uint64_t chunkValue = 0;
+        for (NSUInteger byteIndex = 0; byteIndex < 8; byteIndex++) {
+            NSUInteger sourceIndex = chunkIndex * 8 + byteIndex;
+            if (sourceIndex >= data.length) break;
+            chunkValue |= ((uint64_t)bytes[sourceIndex]) << (byteIndex * 8);
+        }
+        int token = VCamNotifyTokenForName(VCamSettingChunkStateName(key, chunkIndex));
+        if (token == NOTIFY_TOKEN_INVALID || notify_set_state(token, chunkValue) != NOTIFY_STATUS_OK) {
+            NSLog(@"[VCam] failed to publish shared setting %@ chunk %lu", key, (unsigned long)chunkIndex);
+            return;
+        }
+    }
+
+    // Publish the length only after every chunk is written so readers never
+    // interpret a partially updated path as a complete selection.
+    if (notify_set_state(lengthToken, (uint64_t)data.length + 1) != NOTIFY_STATUS_OK) {
+        NSLog(@"[VCam] failed to commit shared setting %@", key);
+        return;
+    }
+    notify_post(VCamSettingStateName(key).UTF8String);
+}
+
+static NSString *VCamSerializeSettingValue(NSString *key, id value) {
+    if (!value) return @"";
+    if ([value isKindOfClass:NSString.class]) return value;
+    if ([key isEqualToString:VCamEnabledKey] || [key isEqualToString:VCamVideoPausedKey]) {
+        return [value respondsToSelector:@selector(boolValue)] && [value boolValue] ? @"1" : @"0";
+    }
+    if ([value respondsToSelector:@selector(stringValue)]) return [value stringValue];
+    return [value description] ?: @"";
+}
+
+static id VCamDeserializeSettingValue(NSString *key, NSString *value) {
+    if (value.length == 0) return nil;
+    if ([key isEqualToString:VCamEnabledKey] || [key isEqualToString:VCamVideoPausedKey]) return @([value boolValue]);
+    if ([key isEqualToString:VCamOffsetXKey] || [key isEqualToString:VCamOffsetYKey] || [key isEqualToString:VCamZoomKey]) return @([value doubleValue]);
+    if ([key isEqualToString:VCamRotationKey]) return @([value integerValue]);
+    return value;
 }
 
 static uint64_t VCamReadHeartbeatForProcess(NSString *processName) {
@@ -151,19 +228,16 @@ static BOOL VCamEnsureSharedDirectory(void) {
 id VCamCopySetting(NSString *key) {
     if (key.length == 0) return nil;
 
-    // Replacement state must not depend on a shared plist path: the menu and
-    // camera daemon can have different RootHide filesystem views. Darwin notify
-    // is the authoritative cross-process value, with the plist used for migration.
-    if ([key isEqualToString:VCamEnabledKey]) {
-        BOOL publishedValue = NO;
-        if (VCamReadPublishedEnabledState(&publishedValue)) return @(publishedValue);
+    NSString *publishedValue = nil;
+    if (VCamReadPublishedStringSetting(key, &publishedValue)) {
+        return VCamDeserializeSettingValue(key, publishedValue);
     }
 
+    // Migration path for values written by earlier releases. The first process
+    // that can still see the legacy plist republishes each value to Darwin notify.
     NSDictionary *settings = [NSDictionary dictionaryWithContentsOfFile:VCamPreferencesFilePath()];
     id value = settings[key];
-    if ([key isEqualToString:VCamEnabledKey] && value) {
-        VCamPublishEnabledState(value);
-    }
+    if (value) VCamPublishStringSetting(key, VCamSerializeSettingValue(key, value));
     return value;
 }
 
@@ -182,9 +256,9 @@ void VCamSetSetting(NSString *key, id value) {
         }
     }
 
-    // Publish after the plist write. The notify state remains authoritative for
-    // Enabled, so mediaserverd receives the toggle even if its plist view differs.
-    if ([key isEqualToString:VCamEnabledKey]) VCamPublishEnabledState(value);
+    // Publish all settings, including MediaPath and MediaType, independently of
+    // the filesystem. SpringBoard and mediaserverd consume the same notify state.
+    VCamPublishStringSetting(key, VCamSerializeSettingValue(key, value));
 }
 
 NSDictionary *VCamCopyRuntimeStatus(void) {

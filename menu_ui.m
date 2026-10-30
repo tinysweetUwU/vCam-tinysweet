@@ -455,6 +455,11 @@ static UILabel *VCamMakeLabel(NSString *text, UIFont *font, UIColor *color) {
         ? [NSString stringWithFormat:@"Replacement state (mediaserverd): %@", [runtime[@"replacementEnabled"] boolValue] ? @"ON" : @"OFF"]
         : @"Replacement state (mediaserverd): WAITING";
     NSString *outputLine = rendered ? [NSString stringWithFormat:@"Buffer render call: SENT (%@)", runtime[@"renderedFrameSize"] ?: @"size unknown"] : @"Buffer render call: NOT SENT YET";
+    BOOL selectionReceived = [runtime[@"mediaSelectionReceived"] boolValue];
+    NSString *selectionName = [runtime[@"mediaSelectionFilename"] isKindOfClass:NSString.class] ? runtime[@"mediaSelectionFilename"] : @"";
+    NSString *selectionLine = selectionReceived
+        ? [NSString stringWithFormat:@"Media selection (daemon): RECEIVED (%@)", selectionName.length ? selectionName : @"filename unavailable"]
+        : @"Media selection (daemon): NOT RECEIVED";
 
     NSMutableArray<NSString *> *lines = [NSMutableArray arrayWithArray:@[
         daemonLine,
@@ -462,6 +467,7 @@ static UILabel *VCamMakeLabel(NSString *text, UIFont *font, UIColor *color) {
         [NSString stringWithFormat:@"BWNodeOutput hook: %@", hookState.uppercaseString],
         frameLine,
         enabledLine,
+        selectionLine,
         mediaLine,
         outputLine,
         @"Camera coverage: front and rear live preview streams"
@@ -670,19 +676,14 @@ static UILabel *VCamMakeLabel(NSString *text, UIFont *font, UIColor *color) {
 + (void)showMenu {
     dispatch_async(dispatch_get_main_queue(), ^{
         if (!sOverlayWindow) {
-            UIWindowScene *activeScene = nil;
-            for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
-                if ([scene isKindOfClass:[UIWindowScene class]] && scene.activationState == UISceneActivationStateForegroundActive) {
-                    activeScene = (UIWindowScene *)scene;
-                    break;
-                }
-            }
-            VCamOverlayWindow *window = activeScene
-                ? [[VCamOverlayWindow alloc] initWithWindowScene:activeScene]
-                : [[VCamOverlayWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
+            // SpringBoard owns this detached system overlay, so it remains above
+            // foreground app windows instead of being tied to the Home Screen scene.
+            VCamOverlayWindow *window = [[VCamOverlayWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
             window.frame = UIScreen.mainScreen.bounds;
-            window.windowLevel = UIWindowLevelNormal + 1.0;
+            window.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+            window.windowLevel = UIWindowLevelAlert - 1.0;
             window.backgroundColor = UIColor.clearColor;
+            window.opaque = NO;
             window.rootViewController = [[VCamMenuViewController alloc] init];
             sOverlayWindow = window;
         }

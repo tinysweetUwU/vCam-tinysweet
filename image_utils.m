@@ -223,6 +223,11 @@ void loadReplacementMedia(void) {
 
         id pathValue = VCamCopySetting(VCamMediaPathKey);
         NSString *observedPath = [pathValue isKindOfClass:[NSString class]] ? [(NSString *)pathValue copy] : nil;
+        NSString *observedType = VCamCopySetting(VCamMediaTypeKey);
+        VCamSetRuntimeStatus(@"mediaSelectionReceived", @(observedPath.length > 0));
+        VCamSetRuntimeStatus(@"mediaSelectionTransport", @"Darwin Notify");
+        VCamSetRuntimeStatus(@"mediaSelectionFilename", observedPath.lastPathComponent ?: @"");
+        VCamSetRuntimeStatus(@"mediaSelectionType", observedType ?: @"unknown");
 
         if (!sEnabled) {
             if (sCurrentMode == VCamModeVideo) [sVideoPlayer pause];
@@ -234,7 +239,7 @@ void loadReplacementMedia(void) {
         if (![pathValue isKindOfClass:[NSString class]] || [(NSString *)pathValue length] == 0) {
             VCamSetRuntimeStatus(@"replacementRendered", @NO);
             VCamSetRuntimeStatus(@"mediaState", @"no-selection");
-            VCamSetRuntimeStatus(@"mediaDetail", @"No photo or video has been selected");
+            VCamSetRuntimeStatus(@"mediaDetail", @"mediaserverd has not received a selected media path from SpringBoard");
             return;
         }
         newPath = observedPath;
