@@ -214,6 +214,7 @@ void loadReplacementMedia(void) {
 
         id enabledValue = VCamCopySetting(VCamEnabledKey);
         sEnabled = enabledValue ? [enabledValue boolValue] : NO;
+        VCamSetRuntimeStatus(@"replacementEnabled", @(sEnabled));
         sOffsetX = MAX(-1.0, MIN(1.0, VCamNumber(VCamCopySetting(VCamOffsetXKey), 0.0)));
         sOffsetY = MAX(-1.0, MIN(1.0, VCamNumber(VCamCopySetting(VCamOffsetYKey), 0.0)));
         sZoom = MAX(0.5, MIN(3.0, VCamNumber(VCamCopySetting(VCamZoomKey), 1.0)));

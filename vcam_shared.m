@@ -13,7 +13,7 @@ NSString * const VCamOffsetYKey = @"OffsetY";
 NSString * const VCamRotationKey = @"Rotation";
 NSString * const VCamZoomKey = @"Zoom";
 NSString * const VCamVideoPausedKey = @"VideoPaused";
-NSString * const VCamRuntimeVersion = @"0.1.10";
+NSString * const VCamRuntimeVersion = @"0.1.11";
 
 static NSString *VCamPreferencesFilePath(void) {
     return [VCamMediaDirectory() stringByAppendingPathComponent:@"settings.plist"];
@@ -64,10 +64,10 @@ static NSString *VCamHeartbeatName(NSString *processName) {
     return [NSString stringWithFormat:@"com.tinysweet.vcamios.heartbeat.%@", processName];
 }
 
-// notify state is system-wide and does not depend on SpringBoard and
-// mediaserverd sharing a sandboxed /tmp view. Tokens are process-local; state
-// is maintained by notifyd and can be read by another process.
-static int VCamNotifyToken(NSString *processName) {
+// Darwin notify state is shared by SpringBoard and mediaserverd even when
+// RootHide gives the processes different filesystem views. Tokens themselves
+// are process-local, so each process registers its own token for the same name.
+static int VCamNotifyTokenForName(NSString *name) {
     static NSMutableDictionary<NSString *, NSNumber *> *tokens;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
@@ -75,18 +75,47 @@ static int VCamNotifyToken(NSString *processName) {
     });
 
     @synchronized (tokens) {
-        NSNumber *cached = tokens[processName];
+        NSNumber *cached = tokens[name];
         if (cached) return cached.intValue;
 
         int token = NOTIFY_TOKEN_INVALID;
-        NSString *name = VCamHeartbeatName(processName);
         uint32_t status = notify_register_check(name.UTF8String, &token);
         if (status != NOTIFY_STATUS_OK || token == NOTIFY_TOKEN_INVALID) {
             NSLog(@"[VCam] notify_register_check failed for %@: %u", name, status);
             return NOTIFY_TOKEN_INVALID;
         }
-        tokens[processName] = @(token);
+        tokens[name] = @(token);
         return token;
+    }
+}
+
+static int VCamNotifyToken(NSString *processName) {
+    return VCamNotifyTokenForName(VCamHeartbeatName(processName));
+}
+
+static NSString *VCamSettingStateName(NSString *key) {
+    return [NSString stringWithFormat:@"%@.setting.%@", VCamPreferenceDomain, key];
+}
+
+// Values 2 and 3 are explicit false/true markers. Zero means the setting has
+// not yet been published by this version and allows migration from settings.plist.
+static BOOL VCamReadPublishedEnabledState(BOOL *enabledOut) {
+    int token = VCamNotifyTokenForName(VCamSettingStateName(VCamEnabledKey));
+    if (token == NOTIFY_TOKEN_INVALID) return NO;
+
+    uint64_t state = 0;
+    if (notify_get_state(token, &state) != NOTIFY_STATUS_OK || state < 2) return NO;
+    if (enabledOut) *enabledOut = (state == 3);
+    return YES;
+}
+
+static void VCamPublishEnabledState(id value) {
+    int token = VCamNotifyTokenForName(VCamSettingStateName(VCamEnabledKey));
+    if (token == NOTIFY_TOKEN_INVALID) return;
+
+    uint64_t state = value && [value boolValue] ? 3 : 2;
+    if (notify_set_state(token, state) == NOTIFY_STATUS_OK) {
+        notify_post(VCamSettingStateName(VCamEnabledKey).UTF8String);
     }
 }
 
@@ -121,8 +150,21 @@ static BOOL VCamEnsureSharedDirectory(void) {
 
 id VCamCopySetting(NSString *key) {
     if (key.length == 0) return nil;
+
+    // Replacement state must not depend on a shared plist path: the menu and
+    // camera daemon can have different RootHide filesystem views. Darwin notify
+    // is the authoritative cross-process value, with the plist used for migration.
+    if ([key isEqualToString:VCamEnabledKey]) {
+        BOOL publishedValue = NO;
+        if (VCamReadPublishedEnabledState(&publishedValue)) return @(publishedValue);
+    }
+
     NSDictionary *settings = [NSDictionary dictionaryWithContentsOfFile:VCamPreferencesFilePath()];
-    return settings[key];
+    id value = settings[key];
+    if ([key isEqualToString:VCamEnabledKey] && value) {
+        VCamPublishEnabledState(value);
+    }
+    return value;
 }
 
 void VCamSetSetting(NSString *key, id value) {
@@ -133,11 +175,16 @@ void VCamSetSetting(NSString *key, id value) {
         if (!settings) settings = [NSMutableDictionary dictionary];
         if (value) settings[key] = value;
         else [settings removeObjectForKey:key];
-        if (!VCamEnsureSharedDirectory()) return;
-        BOOL didWrite = [settings writeToFile:path atomically:YES];
-        if (didWrite) chmod(path.fileSystemRepresentation, 0644);
-        else NSLog(@"[VCam] failed to write shared settings %@", path);
+        if (VCamEnsureSharedDirectory()) {
+            BOOL didWrite = [settings writeToFile:path atomically:YES];
+            if (didWrite) chmod(path.fileSystemRepresentation, 0644);
+            else NSLog(@"[VCam] failed to write shared settings %@", path);
+        }
     }
+
+    // Publish after the plist write. The notify state remains authoritative for
+    // Enabled, so mediaserverd receives the toggle even if its plist view differs.
+    if ([key isEqualToString:VCamEnabledKey]) VCamPublishEnabledState(value);
 }
 
 NSDictionary *VCamCopyRuntimeStatus(void) {

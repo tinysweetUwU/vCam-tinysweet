@@ -1,10 +1,3 @@
-# VCam iOS
+# VCam iOS 0.1.11
 
-VCam replaces the live camera preview with a photo or video selected from the Photos library.
-
-- Supports photo and video replacement for front and rear camera previews.
-- Preserves the selected media file and its original resolution.
-- Plays videos continuously with looping and pause/resume controls.
-- Provides compact floating controls to move, rotate, and zoom the replacement media.
-- Allows the floating controls to be shown or hidden at any time.
-- Supports enabling or disabling camera replacement and viewing optional runtime logs.
+VCam replaces the live front and rear camera preview with a selected photo or video. It includes media selection, playback controls, and a floating control panel for positioning, rotation, and zoom.

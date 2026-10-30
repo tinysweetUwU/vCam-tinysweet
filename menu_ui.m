@@ -451,6 +451,9 @@ static UILabel *VCamMakeLabel(NSString *text, UIFont *font, UIColor *color) {
     NSString *heartbeatLine = heartbeatAge >= 0 ? [NSString stringWithFormat:@"mediaserverd heartbeat: %@ (%lds ago)", mediaLoaded ? @"ALIVE" : @"STALE", (long)heartbeatAge] : @"mediaserverd heartbeat: NOT RECEIVED";
     NSString *frameLine = framesSeen ? [NSString stringWithFormat:@"Camera frames: RECEIVED (%@)", runtime[@"cameraFrameSize"] ?: @"size unknown"] : @"Camera frames: WAITING (open Camera and start preview)";
     NSString *mediaLine = [NSString stringWithFormat:@"Media: %@%@", mediaState.uppercaseString, mediaDetail.length ? [@" — " stringByAppendingString:mediaDetail] : @""];
+    NSString *enabledLine = [runtime[@"replacementEnabled"] respondsToSelector:@selector(boolValue)]
+        ? [NSString stringWithFormat:@"Replacement state (mediaserverd): %@", [runtime[@"replacementEnabled"] boolValue] ? @"ON" : @"OFF"]
+        : @"Replacement state (mediaserverd): WAITING";
     NSString *outputLine = rendered ? [NSString stringWithFormat:@"Buffer render call: SENT (%@)", runtime[@"renderedFrameSize"] ?: @"size unknown"] : @"Buffer render call: NOT SENT YET";
 
     NSMutableArray<NSString *> *lines = [NSMutableArray arrayWithArray:@[
@@ -458,6 +461,7 @@ static UILabel *VCamMakeLabel(NSString *text, UIFont *font, UIColor *color) {
         heartbeatLine,
         [NSString stringWithFormat:@"BWNodeOutput hook: %@", hookState.uppercaseString],
         frameLine,
+        enabledLine,
         mediaLine,
         outputLine,
         @"Camera coverage: front and rear live preview streams"
