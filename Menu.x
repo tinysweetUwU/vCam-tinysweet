@@ -1,32 +1,21 @@
 #import <UIKit/UIKit.h>
-#import <objc/message.h>
 #import <QuartzCore/QuartzCore.h>
 #import "vcam_shared.h"
 #import "vcam_menu.h"
 
-// Observe actual volume adjustments in SpringBoard and pair opposite directions
-// to detect the Volume Up + Volume Down shortcut.
 @interface SBVolumeControl : NSObject
-- (float)_effectiveVolume;
-- (void)setVolume:(float)volume forKeyPress:(BOOL)forKeyPress;
+- (void)handleVolumeButtonWithType:(long long)type down:(BOOL)down;
 @end
 
 static NSInteger sPendingVolumeDirection = 0;
 static CFTimeInterval sPendingVolumeTime = 0;
 static CFTimeInterval sLastMenuToggleTime = 0;
-static const CFTimeInterval VCamChordWindow = 0.45;
+static const CFTimeInterval VCamChordWindow = 0.60;
 static const CFTimeInterval VCamToggleDebounce = 0.90;
 
-static void VCamObserveVolumeChord(SBVolumeControl *controller, float requestedVolume, BOOL forKeyPress) {
-    if (!forKeyPress || !controller) return;
+static void VCamRegisterVolumeDirection(NSInteger direction) {
+    if (direction != 1 && direction != -1) return;
 
-    float currentVolume = 0.0f;
-    SEL currentSelector = @selector(_effectiveVolume);
-    if ([controller respondsToSelector:currentSelector]) {
-        currentVolume = ((float (*)(id, SEL))objc_msgSend)(controller, currentSelector);
-    }
-
-    NSInteger direction = requestedVolume >= currentVolume ? 1 : -1;
     CFTimeInterval now = CACurrentMediaTime();
     BOOL shouldToggle = NO;
 
@@ -34,19 +23,24 @@ static void VCamObserveVolumeChord(SBVolumeControl *controller, float requestedV
         if (now - sLastMenuToggleTime < VCamToggleDebounce) return;
 
         if (sPendingVolumeDirection != 0 &&
-            direction != sPendingVolumeDirection &&
-            now - sPendingVolumeTime <= VCamChordWindow) {
+            now - sPendingVolumeTime > VCamChordWindow) {
+            sPendingVolumeDirection = 0;
+            sPendingVolumeTime = 0;
+        }
+
+        if (sPendingVolumeDirection == 0) {
+            sPendingVolumeDirection = direction;
+            sPendingVolumeTime = now;
+        } else if (direction != sPendingVolumeDirection) {
             shouldToggle = YES;
             sPendingVolumeDirection = 0;
             sPendingVolumeTime = 0;
             sLastMenuToggleTime = now;
-        } else {
-            sPendingVolumeDirection = direction;
-            sPendingVolumeTime = now;
         }
     }
 
     if (shouldToggle) {
+        NSLog(@"[VCam] Volume Up + Volume Down detected; toggling menu");
         dispatch_async(dispatch_get_main_queue(), ^{
             [VCamMenuPresenter toggleMenu];
         });
@@ -55,9 +49,17 @@ static void VCamObserveVolumeChord(SBVolumeControl *controller, float requestedV
 
 %hook SBVolumeControl
 
-- (void)setVolume:(float)volume forKeyPress:(BOOL)forKeyPress {
-    VCamObserveVolumeChord(self, volume, forKeyPress);
-    %orig(volume, forKeyPress);
+- (void)handleVolumeButtonWithType:(long long)type down:(BOOL)down {
+    if (down) {
+        // SpringBoard uses 102 for Volume Up and 103 for Volume Down.
+        if (type == 102) VCamRegisterVolumeDirection(1);
+        else if (type == 103) VCamRegisterVolumeDirection(-1);
+    }
+    %orig(type, down);
 }
 
 %end
+
+%ctor {
+    NSLog(@"[VCam] Volume shortcut hook loaded (SBVolumeControl handleVolumeButtonWithType:down:)");
+}
