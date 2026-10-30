@@ -1,4 +1,4 @@
-# VCam iOS 0.1.28
+# VCam iOS 0.1.29
 
 Virtual camera replacement for iOS with photo and video support, image positioning and transform controls, and a floating control panel.
 

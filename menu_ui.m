@@ -877,12 +877,13 @@ static UILabel *VCamMakeLabel(NSString *text, UIFont *font, UIColor *color) {
     CGFloat value = [VCamCopySetting(VCamOffsetYKey) respondsToSelector:@selector(doubleValue)] ? [VCamCopySetting(VCamOffsetYKey) doubleValue] : 0.0;
     VCamSetSetting(VCamOffsetYKey, @(MAX(-1.0, MIN(1.0, value + delta))));
 }
-// Offsets are stored in screen coordinates: +X is right and +Y is down.
-// image_utils converts screen Y to Core Image's Y-up coordinate system.
-- (void)moveLeft { [self adjustOffsetX:-VCamMoveStep]; }
-- (void)moveRight { [self adjustOffsetX:VCamMoveStep]; }
-- (void)moveUp { [self adjustOffsetY:-VCamMoveStep]; }
-- (void)moveDown { [self adjustOffsetY:VCamMoveStep]; }
+// The camera pixel buffer is oriented 90 degrees relative to the portrait
+// preview on this device. Map screen-space D-pad directions onto buffer axes
+// so each arrow moves the replacement in the direction shown by the UI.
+- (void)moveLeft { [self adjustOffsetY:-VCamMoveStep]; }
+- (void)moveRight { [self adjustOffsetY:VCamMoveStep]; }
+- (void)moveUp { [self adjustOffsetX:VCamMoveStep]; }
+- (void)moveDown { [self adjustOffsetX:-VCamMoveStep]; }
 - (void)resetPosition { VCamSetSetting(VCamOffsetXKey, @0.0); VCamSetSetting(VCamOffsetYKey, @0.0); }
 // Core Image uses a y-up coordinate system: positive angles rotate
 // counter-clockwise on screen. Keep the button labels aligned with that
