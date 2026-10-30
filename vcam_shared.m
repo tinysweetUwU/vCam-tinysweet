@@ -12,7 +12,7 @@ NSString * const VCamOffsetXKey = @"OffsetX";
 NSString * const VCamOffsetYKey = @"OffsetY";
 NSString * const VCamRotationKey = @"Rotation";
 NSString * const VCamZoomKey = @"Zoom";
-NSString * const VCamRuntimeVersion = @"0.1.7";
+NSString * const VCamRuntimeVersion = @"0.1.8";
 
 static NSString *VCamPreferencesFilePath(void) {
     return [VCamMediaDirectory() stringByAppendingPathComponent:@"settings.plist"];
