@@ -20,7 +20,7 @@ NSString * const VCamZoomKey = @"Zoom";
 NSString * const VCamVideoPausedKey = @"VideoPaused";
 NSString * const VCamMediaSandboxTokenKey = @"MediaSandboxToken";
 NSString * const VCamMediaSandboxStateKey = @"MediaSandboxState";
-NSString * const VCamRuntimeVersion = @"0.1.17";
+NSString * const VCamRuntimeVersion = @"0.1.18";
 
 // The camera daemon has its own Apple sandbox. A world-readable file under
 // /var/mobile/Media is not automatically readable by mediaserverd; the
@@ -43,7 +43,7 @@ static void *VCamSandboxSymbol(const char *name) {
     return sandboxLibrary ? dlsym(sandboxLibrary, name) : NULL;
 }
 
-NSString *VCamIssueMediaReadExtension(NSString *path, NSString **errorOut) {
+NSString * _Nullable VCamIssueMediaReadExtension(NSString *path, NSString * _Nullable * _Nullable errorOut) {
     if (errorOut) *errorOut = nil;
     if (path.length == 0) {
         if (errorOut) *errorOut = @"Empty media path";

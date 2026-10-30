@@ -18,7 +18,7 @@ FOUNDATION_EXPORT NSString * const VCamRuntimeVersion;
 FOUNDATION_EXPORT id _Nullable VCamCopySetting(NSString *key);
 FOUNDATION_EXPORT void VCamSetSetting(NSString *key, id _Nullable value);
 FOUNDATION_EXPORT NSString *VCamMediaDirectory(void);
-FOUNDATION_EXPORT NSString * _Nullable VCamIssueMediaReadExtension(NSString *path, NSString ** _Nullable errorOut);
+FOUNDATION_EXPORT NSString * _Nullable VCamIssueMediaReadExtension(NSString *path, NSString * _Nullable * _Nullable errorOut);
 FOUNDATION_EXPORT int64_t VCamConsumeMediaReadExtension(NSString *token);
 FOUNDATION_EXPORT void VCamReleaseMediaReadExtension(int64_t handle);
 

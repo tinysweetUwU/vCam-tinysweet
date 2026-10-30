@@ -179,6 +179,9 @@ static BOOL VCamPrepareVideo(NSString *path,
 }
 
 static BOOL VCamActivateMediaReadAccess(NSString *path) {
+    // Ensure the shared lock exists before synchronizing on it. This routine
+    // also runs on the asynchronous media-loading queue.
+    VCamEnsureState();
     NSString *token = VCamCopySetting(VCamMediaSandboxTokenKey);
     if (![token isKindOfClass:NSString.class] || token.length == 0) {
         NSString *publishedState = VCamCopySetting(VCamMediaSandboxStateKey) ?: @"not-published";
@@ -187,7 +190,7 @@ static BOOL VCamActivateMediaReadAccess(NSString *path) {
         return NO;
     }
 
-    @synchronized (sLock ?: [VCamMediaSandboxTokenKey class]) {
+    @synchronized (sLock) {
         if (sMediaSandboxExtensionHandle >= 0 && [sConsumedMediaSandboxToken isEqualToString:token]) {
             VCamSetRuntimeStatus(@"mediaSandboxState", @"consumed");
             return YES;
