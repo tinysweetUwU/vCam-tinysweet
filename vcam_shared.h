@@ -11,16 +11,11 @@ FOUNDATION_EXPORT NSString * const VCamOffsetYKey;
 FOUNDATION_EXPORT NSString * const VCamRotationKey;
 FOUNDATION_EXPORT NSString * const VCamZoomKey;
 FOUNDATION_EXPORT NSString * const VCamVideoPausedKey;
-FOUNDATION_EXPORT NSString * const VCamMediaSandboxTokenKey;
-FOUNDATION_EXPORT NSString * const VCamMediaSandboxStateKey;
 FOUNDATION_EXPORT NSString * const VCamRuntimeVersion;
 
 FOUNDATION_EXPORT id _Nullable VCamCopySetting(NSString *key);
 FOUNDATION_EXPORT void VCamSetSetting(NSString *key, id _Nullable value);
 FOUNDATION_EXPORT NSString *VCamMediaDirectory(void);
-FOUNDATION_EXPORT NSString * _Nullable VCamIssueMediaReadExtension(NSString *path, NSString * _Nullable * _Nullable errorOut);
-FOUNDATION_EXPORT int64_t VCamConsumeMediaReadExtension(NSString *token);
-FOUNDATION_EXPORT void VCamReleaseMediaReadExtension(int64_t handle);
 
 // Runtime status is published by mediaserverd through Darwin notify (cross-sandbox), with a plist as supplemental detail.
 FOUNDATION_EXPORT NSDictionary *VCamCopyRuntimeStatus(void);

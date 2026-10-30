@@ -288,7 +288,7 @@ static UILabel *VCamMakeLabel(NSString *text, UIFont *font, UIColor *color) {
     [_floatingControl addGestureRecognizer:pan];
 
     UIVisualEffectView *panel = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemMaterialDark]];
-    panel.frame = CGRectMake(0, 0, 132, 168);
+    panel.frame = CGRectMake(0, 0, 140, 250);
     panel.layer.cornerRadius = 15;
     panel.layer.masksToBounds = YES;
     panel.layer.borderWidth = 1;
@@ -311,31 +311,45 @@ static UILabel *VCamMakeLabel(NSString *text, UIFont *font, UIColor *color) {
         [stack.bottomAnchor constraintEqualToAnchor:panel.contentView.bottomAnchor constant:-8]
     ]];
 
+    // Rotation row: keep the two rotation actions together.
     UIStackView *row1 = [self horizontalRow];
-    [row1 addArrangedSubview:VCamMakeIconButton(@"arrow.up", @"Move up", self, @selector(moveUp))];
     [row1 addArrangedSubview:VCamMakeIconButton(@"rotate.left", @"Rotate left", self, @selector(rotateLeft))];
     [row1 addArrangedSubview:VCamMakeIconButton(@"rotate.right", @"Rotate right", self, @selector(rotateRight))];
+    [row1 addArrangedSubview:[self spacer]];
 
+    // Direction pad: up / left-reset-right / down, in their expected positions.
     UIStackView *row2 = [self horizontalRow];
-    [row2 addArrangedSubview:VCamMakeIconButton(@"arrow.left", @"Move left", self, @selector(moveLeft))];
-    [row2 addArrangedSubview:VCamMakeIconButton(@"scope", @"Reset position", self, @selector(resetPosition))];
-    [row2 addArrangedSubview:VCamMakeIconButton(@"arrow.right", @"Move right", self, @selector(moveRight))];
+    [row2 addArrangedSubview:[self spacer]];
+    [row2 addArrangedSubview:VCamMakeIconButton(@"arrow.up", @"Move up", self, @selector(moveUp))];
+    [row2 addArrangedSubview:[self spacer]];
 
     UIStackView *row3 = [self horizontalRow];
-    [row3 addArrangedSubview:VCamMakeIconButton(@"arrow.down", @"Move down", self, @selector(moveDown))];
-    [row3 addArrangedSubview:VCamMakeIconButton(@"minus.magnifyingglass", @"Zoom out", self, @selector(zoomOut))];
-    [row3 addArrangedSubview:VCamMakeIconButton(@"plus.magnifyingglass", @"Zoom in", self, @selector(zoomIn))];
+    [row3 addArrangedSubview:VCamMakeIconButton(@"arrow.left", @"Move left", self, @selector(moveLeft))];
+    [row3 addArrangedSubview:VCamMakeIconButton(@"scope", @"Reset position", self, @selector(resetPosition))];
+    [row3 addArrangedSubview:VCamMakeIconButton(@"arrow.right", @"Move right", self, @selector(moveRight))];
 
     UIStackView *row4 = [self horizontalRow];
+    [row4 addArrangedSubview:[self spacer]];
+    [row4 addArrangedSubview:VCamMakeIconButton(@"arrow.down", @"Move down", self, @selector(moveDown))];
+    [row4 addArrangedSubview:[self spacer]];
+
+    UIStackView *row5 = [self horizontalRow];
+    [row5 addArrangedSubview:VCamMakeIconButton(@"minus.magnifyingglass", @"Zoom out", self, @selector(zoomOut))];
+    [row5 addArrangedSubview:VCamMakeIconButton(@"plus.magnifyingglass", @"Zoom in", self, @selector(zoomIn))];
     _videoButton = VCamMakeIconButton(@"pause.fill", @"Pause video", self, @selector(toggleVideoPlayback));
-    [row4 addArrangedSubview:_videoButton];
-    [row4 addArrangedSubview:VCamMakeIconButton(@"eye.slash", @"Hide floating control", self, @selector(hideFloatingControl))];
-    [row4 addArrangedSubview:VCamMakeIconButton(@"xmark", @"Close controls", self, @selector(toggleFloatingPanel))];
+    [row5 addArrangedSubview:_videoButton];
+
+    UIStackView *row6 = [self horizontalRow];
+    [row6 addArrangedSubview:VCamMakeIconButton(@"eye.slash", @"Hide floating control", self, @selector(hideFloatingControl))];
+    [row6 addArrangedSubview:VCamMakeIconButton(@"xmark", @"Close controls", self, @selector(toggleFloatingPanel))];
+    [row6 addArrangedSubview:[self spacer]];
 
     [stack addArrangedSubview:row1];
     [stack addArrangedSubview:row2];
     [stack addArrangedSubview:row3];
     [stack addArrangedSubview:row4];
+    [stack addArrangedSubview:row5];
+    [stack addArrangedSubview:row6];
 
     _passThroughView.floatingControl = _floatingControl;
     _passThroughView.floatingPanel = _floatingPanel;
@@ -475,21 +489,22 @@ static UILabel *VCamMakeLabel(NSString *text, UIFont *font, UIColor *color) {
         ? [NSString stringWithFormat:@"Media selection (daemon): RECEIVED (%@)", selectionName.length ? selectionName : @"filename unavailable"]
         : @"Media selection (daemon): NOT RECEIVED";
 
+    NSString *daemonVersion = [runtime[@"runtimeVersion"] isKindOfClass:NSString.class] ? runtime[@"runtimeVersion"] : @"unknown";
+    NSString *fileAccess = [runtime[@"mediaFileAccess"] isKindOfClass:NSString.class] ? [runtime[@"mediaFileAccess"] uppercaseString] : @"WAITING";
     NSMutableArray<NSString *> *lines = [NSMutableArray arrayWithArray:@[
         daemonLine,
+        [NSString stringWithFormat:@"Camera daemon version: %@", daemonVersion],
         heartbeatLine,
         [NSString stringWithFormat:@"BWNodeOutput hook: %@", hookState.uppercaseString],
         frameLine,
         enabledLine,
         selectionLine,
-        [NSString stringWithFormat:@"Media sandbox access: %@", ([[runtime[@"mediaSandboxState"] description] uppercaseString] ?: @"WAITING")],
+        [NSString stringWithFormat:@"Media file access: %@", fileAccess],
         mediaLine,
         outputLine,
         @"Camera coverage: front and rear live preview streams"
     ]];
     if (hookDetail.length) [lines addObject:[@"Hook detail: " stringByAppendingString:hookDetail]];
-    NSString *sandboxDetail = [runtime[@"mediaSandboxDetail"] isKindOfClass:NSString.class] ? runtime[@"mediaSandboxDetail"] : @"";
-    if (sandboxDetail.length) [lines addObject:[@"Sandbox detail: " stringByAppendingString:sandboxDetail]];
     if (renderError.length) [lines addObject:[@"Render error: " stringByAppendingString:renderError]];
 
     if (!mediaLoaded) {
@@ -503,9 +518,9 @@ static UILabel *VCamMakeLabel(NSString *text, UIFont *font, UIColor *color) {
     } else if ([mediaState isEqualToString:@"no-selection"]) {
         [lines addObject:@"Action: choose a photo or video."];
     } else if ([mediaState isEqualToString:@"file-not-readable"]) {
-        [lines addObject:@"Action: inspect Media sandbox access and Sandbox detail; errno identifies the denied operation."];
+        [lines addObject:@"Action: check Media file access and errno; confirm the camera daemon can open the file under /tmp/VCamMedia."];
     } else if ([mediaState containsString:@"failed"] || [mediaState containsString:@"not-found"] || [mediaState containsString:@"missing"]) {
-        [lines addObject:@"Action: choose the media again and check the detailed Media and Sandbox status."];
+        [lines addObject:@"Action: choose the media again and check Media file access."];
     } else if (!rendered) {
         [lines addObject:@"Action: wait for the camera frame to be replaced, then check Media above."];
     } else {
@@ -639,10 +654,6 @@ static UILabel *VCamMakeLabel(NSString *text, UIFont *font, UIColor *color) {
             return;
         }
 
-        NSString *sandboxError = nil;
-        NSString *sandboxToken = VCamIssueMediaReadExtension(destination, &sandboxError);
-        VCamSetSetting(VCamMediaSandboxTokenKey, sandboxToken);
-        VCamSetSetting(VCamMediaSandboxStateKey, sandboxToken ? @"issued" : [NSString stringWithFormat:@"issue-failed: %@", sandboxError ?: @"unknown error"]);
         VCamSetSetting(VCamMediaTypeKey, [typeIdentifier isEqualToString:VCamMovieTypeIdentifier] ? @"video" : @"image");
         VCamSetSetting(VCamVideoPausedKey, @NO);
         VCamSetSetting(VCamMediaPathKey, destination);
@@ -658,9 +669,7 @@ static UILabel *VCamMakeLabel(NSString *text, UIFont *font, UIColor *color) {
         if (!VCamCopySetting(VCamRotationKey)) VCamSetSetting(VCamRotationKey, @0);
 
         dispatch_async(dispatch_get_main_queue(), ^{
-            self->_statusLabel.text = sandboxToken
-                ? @"Media imported · Camera read access granted"
-                : [NSString stringWithFormat:@"Media imported · Camera permission failed: %@", sandboxError ?: @"unknown error"];
+            self->_statusLabel.text = @"Media imported · Ready for camera";
             [self refreshStatus];
             [self updateVideoButton];
         });
@@ -681,8 +690,8 @@ static UILabel *VCamMakeLabel(NSString *text, UIFont *font, UIColor *color) {
     CGFloat value = [VCamCopySetting(VCamOffsetYKey) respondsToSelector:@selector(doubleValue)] ? [VCamCopySetting(VCamOffsetYKey) doubleValue] : 0.0;
     VCamSetSetting(VCamOffsetYKey, @(MAX(-1.0, MIN(1.0, value + delta))));
 }
-- (void)moveLeft { [self adjustOffsetX:-VCamMoveStep]; }
-- (void)moveRight { [self adjustOffsetX:VCamMoveStep]; }
+- (void)moveLeft { [self adjustOffsetX:VCamMoveStep]; }
+- (void)moveRight { [self adjustOffsetX:-VCamMoveStep]; }
 - (void)moveUp { [self adjustOffsetY:VCamMoveStep]; }
 - (void)moveDown { [self adjustOffsetY:-VCamMoveStep]; }
 - (void)resetPosition { VCamSetSetting(VCamOffsetXKey, @0.0); VCamSetSetting(VCamOffsetYKey, @0.0); }

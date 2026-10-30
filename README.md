@@ -1,3 +1,8 @@
-# VCam iOS 0.1.18
+# VCam iOS 0.1.20
 
-VCam replaces the live front and rear camera preview with a selected photo or video. It includes media selection, video playback controls, and a floating control panel for positioning, rotation, and zoom. The floating control is presented from SpringBoard and remains available while using other apps. The main menu can be opened with the Volume Up + Volume Down shortcut or by long-pressing the floating control.
+Virtual camera replacement for iOS.
+
+- Replace front and rear camera preview with a selected photo or video.
+- Adjust position, zoom, and rotation.
+- Play and pause video replacements.
+- Control replacement from a floating on-screen panel.
