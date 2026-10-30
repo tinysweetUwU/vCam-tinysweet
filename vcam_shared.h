@@ -15,7 +15,7 @@ FOUNDATION_EXPORT id _Nullable VCamCopySetting(NSString *key);
 FOUNDATION_EXPORT void VCamSetSetting(NSString *key, id _Nullable value);
 FOUNDATION_EXPORT NSString *VCamMediaDirectory(void);
 
-// Runtime status is written separately by cameracaptured and mediaserverd, then read by the SpringBoard menu.
+// Runtime status is published by mediaserverd through Darwin notify (cross-sandbox), with a plist as supplemental detail.
 FOUNDATION_EXPORT NSDictionary *VCamCopyRuntimeStatus(void);
 FOUNDATION_EXPORT void VCamSetRuntimeStatus(NSString *key, id _Nullable value);
 FOUNDATION_EXPORT void VCamResetRuntimeStatus(void);

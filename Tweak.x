@@ -40,14 +40,14 @@
 
     @autoreleasepool {
         loadReplacementMedia();
-        CVPixelBufferLockBaseAddress(imageBuffer, 0);
+        // CIContext renders directly to CVPixelBuffer. Locking the base address
+        // is only needed for CPU byte access and can force costly synchronization
+        // on GPU-backed camera buffers, causing preview stutter.
         @try {
             drawReplacementOntoBuffer(imageBuffer);
         } @catch (NSException *exception) {
             VCamSetRuntimeStatus(@"renderError", exception.reason ?: @"Unknown render exception");
             NSLog(@"[VCam] Failed to render replacement media: %@", exception);
-        } @finally {
-            CVPixelBufferUnlockBaseAddress(imageBuffer, 0);
         }
     }
 
@@ -112,7 +112,7 @@ static void VCamTryInstallCaptureHook(void) {
     @autoreleasepool {
         VCamResetRuntimeStatus();
         NSString *processName = NSProcessInfo.processInfo.processName;
-        NSLog(@"[VCam] camera daemon tweak loaded in %@; CMCapture hook installation starting", processName);
+        NSLog(@"[VCam] mediaserverd tweak loaded; CMCapture hook installation starting", processName);
         VCamTryInstallCaptureHook();
     }
 }

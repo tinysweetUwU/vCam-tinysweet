@@ -2,7 +2,7 @@ ARCHS = arm64 arm64e
 TARGET := iphone:clang:16.5:15.0
 THEOS_PACKAGE_SCHEME ?= rootless
 
-INSTALL_TARGET_PROCESSES = SpringBoard mediaserverd cameracaptured
+INSTALL_TARGET_PROCESSES = SpringBoard mediaserverd
 
 include $(THEOS)/makefiles/common.mk
 

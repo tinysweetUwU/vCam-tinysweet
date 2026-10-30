@@ -8,9 +8,9 @@
 #import <math.h>
 #import <ImageIO/ImageIO.h>
 
-#define VCAM_VIDEO_MAX_FRAMES 45
-#define VCAM_VIDEO_SAMPLE_INTERVAL 0.12
-#define VCAM_VIDEO_MAX_DIMENSION 640.0
+#define VCAM_VIDEO_MAX_FRAMES 48
+#define VCAM_VIDEO_SAMPLE_INTERVAL (1.0 / 15.0)
+#define VCAM_VIDEO_MAX_DIMENSION 480.0
 
 // These values are shared with the SpringBoard menu through the shared preferences plist.
 typedef NS_ENUM(NSUInteger, VCamMode) {
@@ -103,7 +103,7 @@ static BOOL VCamDecodeMedia(NSString *path, UIImage **imageOut, NSArray<UIImage 
         NSDictionary *thumbnailOptions = @{
             (__bridge NSString *)kCGImageSourceCreateThumbnailFromImageAlways: @YES,
             (__bridge NSString *)kCGImageSourceCreateThumbnailWithTransform: @YES,
-            (__bridge NSString *)kCGImageSourceThumbnailMaxPixelSize: @1920,
+            (__bridge NSString *)kCGImageSourceThumbnailMaxPixelSize: @1280,
             (__bridge NSString *)kCGImageSourceShouldCacheImmediately: @YES
         };
         CGImageRef thumbnail = CGImageSourceCreateThumbnailAtIndex(imageSource, 0,
@@ -302,58 +302,91 @@ void drawReplacementOntoBuffer(CVPixelBufferRef targetBuffer) {
     if (!targetBuffer) return;
     VCamEnsureState();
 
+    // Take a short-lived snapshot under the lock, then let the GPU render
+    // without holding the state lock. This keeps menu updates/media reloads
+    // from waiting behind a full camera-frame render.
+    UIImage *replacementImage = nil;
+    NSArray<UIImage *> *videoFrames = nil;
+    VCamMode mode = VCamModeNone;
+    BOOL enabled = NO;
+    CGFloat offsetXValue = 0.0;
+    CGFloat offsetYValue = 0.0;
+    CGFloat zoomValue = 1.0;
+    NSInteger rotationValue = 0;
+    CFTimeInterval videoStart = 0;
+    CIContext *renderContext = nil;
+    CGColorSpaceRef renderColorSpace = NULL;
+
     @synchronized (sLock) {
-        if (!sEnabled || sCurrentMode == VCamModeNone || !sRenderContext) return;
+        enabled = sEnabled;
+        mode = sCurrentMode;
+        if (!enabled || mode == VCamModeNone || !sRenderContext) return;
 
-        CIImage *source = nil;
-        if (sCurrentMode == VCamModeImage && sReplacementImage.CGImage) {
-            source = [CIImage imageWithCGImage:sReplacementImage.CGImage];
-        } else if (sCurrentMode == VCamModeVideo && sVideoFrames.count > 0) {
+        replacementImage = sReplacementImage;
+        videoFrames = sVideoFrames;
+        offsetXValue = sOffsetX;
+        offsetYValue = sOffsetY;
+        zoomValue = sZoom;
+        rotationValue = sRotation;
+        if (mode == VCamModeVideo && videoFrames.count > 0) {
             if (sVideoStartTime <= 0) sVideoStartTime = CACurrentMediaTime();
-            NSTimeInterval elapsed = MAX(0, CACurrentMediaTime() - sVideoStartTime);
-            NSUInteger frameIndex = ((NSUInteger)(elapsed / VCAM_VIDEO_SAMPLE_INTERVAL)) % sVideoFrames.count;
-            UIImage *frame = sVideoFrames[frameIndex];
-            if (frame.CGImage) source = [CIImage imageWithCGImage:frame.CGImage];
+            videoStart = sVideoStartTime;
         }
-        if (!source) return;
+        renderContext = sRenderContext;
+        renderColorSpace = sRenderColorSpace;
+    }
 
-        size_t targetWidth = CVPixelBufferGetWidth(targetBuffer);
-        size_t targetHeight = CVPixelBufferGetHeight(targetBuffer);
-        if (targetWidth == 0 || targetHeight == 0) return;
-        CGRect targetRect = CGRectMake(0, 0, targetWidth, targetHeight);
+    CIImage *source = nil;
+    if (mode == VCamModeImage && replacementImage.CGImage) {
+        source = [CIImage imageWithCGImage:replacementImage.CGImage];
+    } else if (mode == VCamModeVideo && videoFrames.count > 0) {
+        NSTimeInterval elapsed = MAX(0, CACurrentMediaTime() - videoStart);
+        NSUInteger frameIndex = ((NSUInteger)(elapsed / VCAM_VIDEO_SAMPLE_INTERVAL)) % videoFrames.count;
+        UIImage *frame = videoFrames[frameIndex];
+        if (frame.CGImage) source = [CIImage imageWithCGImage:frame.CGImage];
+    }
+    if (!source) return;
 
-        // Normalize the image origin, rotate it, then scale-to-fill the camera buffer.
-        CGRect sourceExtent = source.extent;
-        source = [source imageByApplyingTransform:CGAffineTransformMakeTranslation(-sourceExtent.origin.x,
-                                                                                    -sourceExtent.origin.y)];
-        CGFloat radians = ((CGFloat)(sRotation % 360)) * (CGFloat)M_PI / 180.0;
-        if (fabs(radians) > 0.0001) {
-            source = [source imageByApplyingTransform:CGAffineTransformMakeRotation(radians)];
-        }
+    size_t targetWidth = CVPixelBufferGetWidth(targetBuffer);
+    size_t targetHeight = CVPixelBufferGetHeight(targetBuffer);
+    if (targetWidth == 0 || targetHeight == 0) return;
+    CGRect targetRect = CGRectMake(0, 0, targetWidth, targetHeight);
 
-        CGRect rotatedExtent = source.extent;
-        CGFloat fitScale = MAX((CGFloat)targetWidth / MAX(rotatedExtent.size.width, 1.0),
-                               (CGFloat)targetHeight / MAX(rotatedExtent.size.height, 1.0));
-        CGFloat scale = fitScale * sZoom;
-        source = [source imageByApplyingTransform:CGAffineTransformMakeScale(scale, scale)];
-        CGRect scaledExtent = source.extent;
+    CGRect sourceExtent = source.extent;
+    source = [source imageByApplyingTransform:CGAffineTransformMakeTranslation(-sourceExtent.origin.x,
+                                                                                -sourceExtent.origin.y)];
+    CGFloat radians = ((CGFloat)(rotationValue % 360)) * (CGFloat)M_PI / 180.0;
+    if (fabs(radians) > 0.0001) {
+        source = [source imageByApplyingTransform:CGAffineTransformMakeRotation(radians)];
+    }
 
-        CGFloat offsetX = ((CGFloat)targetWidth - scaledExtent.size.width) / 2.0 - scaledExtent.origin.x;
-        CGFloat offsetY = ((CGFloat)targetHeight - scaledExtent.size.height) / 2.0 - scaledExtent.origin.y;
-        offsetX += sOffsetX * (CGFloat)targetWidth;
-        offsetY += sOffsetY * (CGFloat)targetHeight;
-        source = [source imageByApplyingTransform:CGAffineTransformMakeTranslation(offsetX, offsetY)];
+    CGRect rotatedExtent = source.extent;
+    CGFloat fitScale = MAX((CGFloat)targetWidth / MAX(rotatedExtent.size.width, 1.0),
+                           (CGFloat)targetHeight / MAX(rotatedExtent.size.height, 1.0));
+    CGFloat scale = fitScale * zoomValue;
+    source = [source imageByApplyingTransform:CGAffineTransformMakeScale(scale, scale)];
+    CGRect scaledExtent = source.extent;
 
-        CIImage *blackBackground = [[CIImage imageWithColor:[CIColor colorWithRed:0 green:0 blue:0 alpha:1]]
-                                    imageByCroppingToRect:targetRect];
-        CIImage *finalImage = [[source imageByCompositingOverImage:blackBackground] imageByCroppingToRect:targetRect];
-        [sRenderContext render:finalImage toCVPixelBuffer:targetBuffer bounds:targetRect colorSpace:sRenderColorSpace];
-        if (!sHasLoggedFirstRender) {
-            sHasLoggedFirstRender = YES;
-            VCamSetRuntimeStatus(@"replacementRendered", @YES);
-            VCamSetRuntimeStatus(@"replacementRenderedAt", [NSDate date]);
-            VCamSetRuntimeStatus(@"renderedFrameSize", [NSString stringWithFormat:@"%zux%zu", targetWidth, targetHeight]);
-            NSLog(@"[VCam] first replacement frame rendered into camera buffer (%zux%zu)", targetWidth, targetHeight);
+    CGFloat translateX = ((CGFloat)targetWidth - scaledExtent.size.width) / 2.0 - scaledExtent.origin.x;
+    CGFloat translateY = ((CGFloat)targetHeight - scaledExtent.size.height) / 2.0 - scaledExtent.origin.y;
+    translateX += offsetXValue * (CGFloat)targetWidth;
+    translateY += offsetYValue * (CGFloat)targetHeight;
+    source = [source imageByApplyingTransform:CGAffineTransformMakeTranslation(translateX, translateY)];
+
+    CIImage *background = [[CIImage imageWithColor:[CIColor colorWithRed:0 green:0 blue:0 alpha:1]]
+                          imageByCroppingToRect:targetRect];
+    CIImage *finalImage = [[source imageByCompositingOverImage:background] imageByCroppingToRect:targetRect];
+    [renderContext render:finalImage toCVPixelBuffer:targetBuffer bounds:targetRect colorSpace:renderColorSpace];
+
+    if (!sHasLoggedFirstRender) {
+        @synchronized (sLock) {
+            if (!sHasLoggedFirstRender) {
+                sHasLoggedFirstRender = YES;
+                VCamSetRuntimeStatus(@"replacementRendered", @YES);
+                VCamSetRuntimeStatus(@"replacementRenderedAt", [NSDate date]);
+                VCamSetRuntimeStatus(@"renderedFrameSize", [NSString stringWithFormat:@"%zux%zu", targetWidth, targetHeight]);
+                NSLog(@"[VCam] first replacement frame rendered into camera buffer (%zux%zu)", targetWidth, targetHeight);
+            }
         }
     }
 }
