@@ -273,6 +273,10 @@ static UILabel *VCamMakeLabel(NSString *text, UIFont *font, UIColor *color) {
                                         UIScreen.mainScreen.bounds.size.height * 0.68,
                                         38.0, 38.0);
     [_floatingControl addTarget:self action:@selector(toggleFloatingPanel) forControlEvents:UIControlEventTouchUpInside];
+    UILongPressGestureRecognizer *openMenuPress = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(openMainMenuFromControl:)];
+    openMenuPress.minimumPressDuration = 0.65;
+    openMenuPress.cancelsTouchesInView = YES;
+    [_floatingControl addGestureRecognizer:openMenuPress];
     [self.view addSubview:_floatingControl];
 
     UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(dragFloatingControl:)];
@@ -356,6 +360,12 @@ static UILabel *VCamMakeLabel(NSString *text, UIFont *font, UIColor *color) {
     x = MAX(8.0, MIN(width - panelWidth - 8.0, x));
     y = MAX(8.0, MIN(height - panelHeight - 8.0, y));
     _floatingPanel.frame = CGRectMake(x, y, panelWidth, panelHeight);
+}
+
+- (void)openMainMenuFromControl:(UILongPressGestureRecognizer *)gesture {
+    if (gesture.state == UIGestureRecognizerStateBegan) {
+        [VCamMenuPresenter showMenu];
+    }
 }
 
 - (void)toggleFloatingPanel {
@@ -673,20 +683,33 @@ static UILabel *VCamMakeLabel(NSString *text, UIFont *font, UIColor *color) {
     else [self showMenu];
 }
 
++ (void)ensureOverlayWindow {
+    if (sOverlayWindow) return;
+
+    // SpringBoard owns this detached system overlay, so it remains above
+    // foreground app windows instead of being tied to the Home Screen scene.
+    VCamOverlayWindow *window = [[VCamOverlayWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
+    window.frame = UIScreen.mainScreen.bounds;
+    window.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    window.windowLevel = UIWindowLevelAlert - 1.0;
+    window.backgroundColor = UIColor.clearColor;
+    window.opaque = NO;
+    window.rootViewController = [[VCamMenuViewController alloc] init];
+    sOverlayWindow = window;
+}
+
++ (void)installOverlay {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self ensureOverlayWindow];
+        [sOverlayWindow makeKeyAndVisible];
+        [(VCamMenuViewController *)sOverlayWindow.rootViewController setMenuVisible:NO];
+        [sOverlayWindow resignKeyWindow];
+    });
+}
+
 + (void)showMenu {
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (!sOverlayWindow) {
-            // SpringBoard owns this detached system overlay, so it remains above
-            // foreground app windows instead of being tied to the Home Screen scene.
-            VCamOverlayWindow *window = [[VCamOverlayWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
-            window.frame = UIScreen.mainScreen.bounds;
-            window.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-            window.windowLevel = UIWindowLevelAlert - 1.0;
-            window.backgroundColor = UIColor.clearColor;
-            window.opaque = NO;
-            window.rootViewController = [[VCamMenuViewController alloc] init];
-            sOverlayWindow = window;
-        }
+        [self ensureOverlayWindow];
         [sOverlayWindow makeKeyAndVisible];
         [(VCamMenuViewController *)sOverlayWindow.rootViewController setMenuVisible:YES];
     });
