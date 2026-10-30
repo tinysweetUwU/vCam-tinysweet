@@ -8,26 +8,55 @@
 - (void)setMenuVisible:(BOOL)visible;
 @end
 
+@interface VCamPassThroughView : UIView
+@property (nonatomic, weak) UIView *floatingControl;
+@property (nonatomic, weak) UIView *floatingPanel;
+@property (nonatomic) BOOL menuVisible;
+- (UIView *)interactiveSubviewAtPoint:(CGPoint)point;
+@end
+
+@implementation VCamPassThroughView
+- (UIView *)interactiveSubviewAtPoint:(CGPoint)point {
+    if (self.floatingControl && !self.floatingControl.hidden) {
+        CGPoint controlPoint = [self.floatingControl convertPoint:point fromView:self];
+        if (CGRectContainsPoint(self.floatingControl.bounds, controlPoint)) return self.floatingControl;
+    }
+
+    if (self.floatingPanel && !self.floatingPanel.hidden) {
+        CGPoint panelPoint = [self.floatingPanel convertPoint:point fromView:self];
+        UIView *candidate = [self.floatingPanel hitTest:panelPoint withEvent:nil];
+        for (UIView *view = candidate; view && view != self.floatingPanel; view = view.superview) {
+            if ([view isKindOfClass:UIControl.class]) return view;
+        }
+    }
+    return nil;
+}
+
+- (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent *)event {
+    (void)event;
+    if (self.menuVisible) return YES;
+    return [self interactiveSubviewAtPoint:point] != nil;
+}
+
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    if (self.menuVisible) return [super hitTest:point withEvent:event];
+    return [self interactiveSubviewAtPoint:point];
+}
+@end
+
 @interface VCamOverlayWindow : UIWindow
 @end
 
 @implementation VCamOverlayWindow
 - (BOOL)canBecomeKeyWindow { return YES; }
-@end
 
-@interface VCamPassThroughView : UIView
-@property (nonatomic, weak) UIView *floatingControl;
-@property (nonatomic, weak) UIView *floatingPanel;
-@property (nonatomic) BOOL menuVisible;
-@end
-
-@implementation VCamPassThroughView
-- (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent *)event {
-    (void)event;
-    if (self.menuVisible) return YES;
-    if (self.floatingPanel && !self.floatingPanel.hidden && CGRectContainsPoint(self.floatingPanel.frame, point)) return YES;
-    if (self.floatingControl && !self.floatingControl.hidden && CGRectContainsPoint(self.floatingControl.frame, point)) return YES;
-    return NO;
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    VCamPassThroughView *rootView = (VCamPassThroughView *)self.rootViewController.view;
+    if (rootView && !rootView.menuVisible) {
+        CGPoint rootPoint = [rootView convertPoint:point fromView:self];
+        return [rootView hitTest:rootPoint withEvent:event];
+    }
+    return [super hitTest:point withEvent:event];
 }
 @end
 
@@ -52,6 +81,22 @@ static UIButton *VCamMakeButton(NSString *title, UIColor *background, id target,
     return button;
 }
 
+static UIButton *VCamMakeIconButton(NSString *symbolName, NSString *accessibilityLabel, id target, SEL action) {
+    UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
+    UIImage *image = [UIImage systemImageNamed:symbolName];
+    [button setImage:image forState:UIControlStateNormal];
+    button.tintColor = UIColor.whiteColor;
+    button.backgroundColor = [UIColor colorWithWhite:1 alpha:0.12];
+    button.layer.cornerRadius = 9.0;
+    button.layer.masksToBounds = YES;
+    button.translatesAutoresizingMaskIntoConstraints = NO;
+    [button.widthAnchor constraintEqualToConstant:34.0].active = YES;
+    [button.heightAnchor constraintEqualToConstant:34.0].active = YES;
+    button.accessibilityLabel = accessibilityLabel;
+    [button addTarget:target action:action forControlEvents:UIControlEventTouchUpInside];
+    return button;
+}
+
 static UILabel *VCamMakeLabel(NSString *text, UIFont *font, UIColor *color) {
     UILabel *label = [[UILabel alloc] init];
     label.text = text;
@@ -66,6 +111,8 @@ static UILabel *VCamMakeLabel(NSString *text, UIFont *font, UIColor *color) {
     UILabel *_statusLabel;
     UILabel *_diagnosticLabel;
     UIButton *_toggleButton;
+    UIButton *_controlVisibilityButton;
+    UIButton *_videoButton;
     UIButton *_logsButton;
     UIButton *_backdrop;
     UIView *_panel;
@@ -162,6 +209,9 @@ static UILabel *VCamMakeLabel(NSString *text, UIFont *font, UIColor *color) {
     _toggleButton = VCamMakeButton(@"Enable Replacement", [UIColor colorWithRed:0.13 green:0.52 blue:0.32 alpha:1], self, @selector(toggleReplacement));
     [stack addArrangedSubview:_toggleButton];
 
+    _controlVisibilityButton = VCamMakeButton(@"Hide Control", [UIColor colorWithWhite:1 alpha:0.12], self, @selector(toggleFloatingControlVisibility));
+    [stack addArrangedSubview:_controlVisibilityButton];
+
     _logsButton = VCamMakeButton(@"View Logs", [UIColor colorWithWhite:1 alpha:0.12], self, @selector(toggleLogs));
     [stack addArrangedSubview:_logsButton];
 
@@ -208,32 +258,30 @@ static UILabel *VCamMakeLabel(NSString *text, UIFont *font, UIColor *color) {
 
 - (void)setupFloatingControl {
     _floatingControl = [UIButton buttonWithType:UIButtonTypeSystem];
-    [_floatingControl setTitle:@"Control" forState:UIControlStateNormal];
-    [_floatingControl setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
-    _floatingControl.titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightBold];
-    _floatingControl.backgroundColor = [UIColor colorWithWhite:0.08 alpha:0.92];
-    _floatingControl.layer.cornerRadius = 17;
+    [_floatingControl setImage:[UIImage systemImageNamed:@"slider.horizontal.3"] forState:UIControlStateNormal];
+    _floatingControl.tintColor = UIColor.whiteColor;
+    _floatingControl.accessibilityLabel = @"Open camera controls";
+    _floatingControl.backgroundColor = [UIColor colorWithWhite:0.08 alpha:0.94];
+    _floatingControl.layer.cornerRadius = 19.0;
     _floatingControl.layer.borderWidth = 1;
     _floatingControl.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.24].CGColor;
     _floatingControl.layer.shadowColor = UIColor.blackColor.CGColor;
     _floatingControl.layer.shadowOpacity = 0.28;
-    _floatingControl.layer.shadowRadius = 8;
-    _floatingControl.layer.shadowOffset = CGSizeMake(0, 3);
-    _floatingControl.frame = CGRectMake(UIScreen.mainScreen.bounds.size.width - 86.0,
+    _floatingControl.layer.shadowRadius = 7;
+    _floatingControl.layer.shadowOffset = CGSizeMake(0, 2);
+    _floatingControl.frame = CGRectMake(UIScreen.mainScreen.bounds.size.width - 52.0,
                                         UIScreen.mainScreen.bounds.size.height * 0.68,
-                                        72.0, 38.0);
+                                        38.0, 38.0);
+    [_floatingControl addTarget:self action:@selector(toggleFloatingPanel) forControlEvents:UIControlEventTouchUpInside];
     [self.view addSubview:_floatingControl];
-
-    UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(toggleFloatingPanel)];
-    [_floatingControl addGestureRecognizer:tap];
 
     UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(dragFloatingControl:)];
     pan.cancelsTouchesInView = NO;
     [_floatingControl addGestureRecognizer:pan];
 
     UIVisualEffectView *panel = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemMaterialDark]];
-    panel.frame = CGRectMake(0, 0, 228, 296);
-    panel.layer.cornerRadius = 18;
+    panel.frame = CGRectMake(0, 0, 132, 168);
+    panel.layer.cornerRadius = 15;
     panel.layer.masksToBounds = YES;
     panel.layer.borderWidth = 1;
     panel.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.18].CGColor;
@@ -243,55 +291,49 @@ static UILabel *VCamMakeLabel(NSString *text, UIFont *font, UIColor *color) {
 
     UIStackView *stack = [[UIStackView alloc] init];
     stack.axis = UILayoutConstraintAxisVertical;
-    stack.spacing = 6;
+    stack.spacing = 5;
+    stack.alignment = UIStackViewAlignmentFill;
+    stack.distribution = UIStackViewDistributionFillEqually;
     stack.translatesAutoresizingMaskIntoConstraints = NO;
     [panel.contentView addSubview:stack];
     [NSLayoutConstraint activateConstraints:@[
-        [stack.leadingAnchor constraintEqualToAnchor:panel.contentView.leadingAnchor constant:10],
-        [stack.trailingAnchor constraintEqualToAnchor:panel.contentView.trailingAnchor constant:-10],
-        [stack.topAnchor constraintEqualToAnchor:panel.contentView.topAnchor constant:9],
-        [stack.bottomAnchor constraintEqualToAnchor:panel.contentView.bottomAnchor constant:-9]
+        [stack.leadingAnchor constraintEqualToAnchor:panel.contentView.leadingAnchor constant:8],
+        [stack.trailingAnchor constraintEqualToAnchor:panel.contentView.trailingAnchor constant:-8],
+        [stack.topAnchor constraintEqualToAnchor:panel.contentView.topAnchor constant:8],
+        [stack.bottomAnchor constraintEqualToAnchor:panel.contentView.bottomAnchor constant:-8]
     ]];
 
-    UIStackView *header = [[UIStackView alloc] init];
-    header.axis = UILayoutConstraintAxisHorizontal;
-    header.alignment = UIStackViewAlignmentCenter;
-    UILabel *heading = VCamMakeLabel(@"Position & Transform", [UIFont systemFontOfSize:13 weight:UIFontWeightBold], UIColor.whiteColor);
-    [header addArrangedSubview:heading];
-    [header addArrangedSubview:[[UIView alloc] init]];
-    UIButton *close = VCamMakeButton(@"✕", [UIColor colorWithWhite:1 alpha:0.12], self, @selector(toggleFloatingPanel));
-    [close.widthAnchor constraintEqualToConstant:34].active = YES;
-    [header addArrangedSubview:close];
-    [stack addArrangedSubview:header];
+    UIStackView *row1 = [self horizontalRow];
+    [row1 addArrangedSubview:VCamMakeIconButton(@"arrow.up", @"Move up", self, @selector(moveUp))];
+    [row1 addArrangedSubview:VCamMakeIconButton(@"rotate.left", @"Rotate left", self, @selector(rotateLeft))];
+    [row1 addArrangedSubview:VCamMakeIconButton(@"rotate.right", @"Rotate right", self, @selector(rotateRight))];
 
-    UIStackView *moveRow1 = [self horizontalRow];
-    [moveRow1 addArrangedSubview:[self spacer]];
-    [moveRow1 addArrangedSubview:VCamMakeButton(@"↑", [UIColor colorWithWhite:1 alpha:0.12], self, @selector(moveUp))];
-    [moveRow1 addArrangedSubview:[self spacer]];
-    UIStackView *moveRow2 = [self horizontalRow];
-    [moveRow2 addArrangedSubview:VCamMakeButton(@"←", [UIColor colorWithWhite:1 alpha:0.12], self, @selector(moveLeft))];
-    [moveRow2 addArrangedSubview:VCamMakeButton(@"Center", [UIColor colorWithWhite:1 alpha:0.08], self, @selector(resetPosition))];
-    [moveRow2 addArrangedSubview:VCamMakeButton(@"→", [UIColor colorWithWhite:1 alpha:0.12], self, @selector(moveRight))];
-    UIStackView *moveRow3 = [self horizontalRow];
-    [moveRow3 addArrangedSubview:[self spacer]];
-    [moveRow3 addArrangedSubview:VCamMakeButton(@"↓", [UIColor colorWithWhite:1 alpha:0.12], self, @selector(moveDown))];
-    [moveRow3 addArrangedSubview:[self spacer]];
-    [stack addArrangedSubview:moveRow1];
-    [stack addArrangedSubview:moveRow2];
-    [stack addArrangedSubview:moveRow3];
+    UIStackView *row2 = [self horizontalRow];
+    [row2 addArrangedSubview:VCamMakeIconButton(@"arrow.left", @"Move left", self, @selector(moveLeft))];
+    [row2 addArrangedSubview:VCamMakeIconButton(@"scope", @"Reset position", self, @selector(resetPosition))];
+    [row2 addArrangedSubview:VCamMakeIconButton(@"arrow.right", @"Move right", self, @selector(moveRight))];
 
-    UIStackView *rotateRow = [self horizontalRow];
-    [rotateRow addArrangedSubview:VCamMakeButton(@"↶ Rotate", [UIColor colorWithWhite:1 alpha:0.12], self, @selector(rotateLeft))];
-    [rotateRow addArrangedSubview:VCamMakeButton(@"Rotate ↻", [UIColor colorWithWhite:1 alpha:0.12], self, @selector(rotateRight))];
-    [stack addArrangedSubview:rotateRow];
+    UIStackView *row3 = [self horizontalRow];
+    [row3 addArrangedSubview:VCamMakeIconButton(@"arrow.down", @"Move down", self, @selector(moveDown))];
+    [row3 addArrangedSubview:VCamMakeIconButton(@"minus.magnifyingglass", @"Zoom out", self, @selector(zoomOut))];
+    [row3 addArrangedSubview:VCamMakeIconButton(@"plus.magnifyingglass", @"Zoom in", self, @selector(zoomIn))];
 
-    UIStackView *zoomRow = [self horizontalRow];
-    [zoomRow addArrangedSubview:VCamMakeButton(@"− Zoom", [UIColor colorWithWhite:1 alpha:0.12], self, @selector(zoomOut))];
-    [zoomRow addArrangedSubview:VCamMakeButton(@"+ Zoom", [UIColor colorWithWhite:1 alpha:0.12], self, @selector(zoomIn))];
-    [stack addArrangedSubview:zoomRow];
+    UIStackView *row4 = [self horizontalRow];
+    _videoButton = VCamMakeIconButton(@"pause.fill", @"Pause video", self, @selector(toggleVideoPlayback));
+    [row4 addArrangedSubview:_videoButton];
+    [row4 addArrangedSubview:VCamMakeIconButton(@"eye.slash", @"Hide floating control", self, @selector(hideFloatingControl))];
+    [row4 addArrangedSubview:VCamMakeIconButton(@"xmark", @"Close controls", self, @selector(toggleFloatingPanel))];
+
+    [stack addArrangedSubview:row1];
+    [stack addArrangedSubview:row2];
+    [stack addArrangedSubview:row3];
+    [stack addArrangedSubview:row4];
 
     _passThroughView.floatingControl = _floatingControl;
     _passThroughView.floatingPanel = _floatingPanel;
+    [self updateControlVisibilityButton];
+    [self updateVideoButton];
+    [self.view bringSubviewToFront:_floatingPanel];
     [self.view bringSubviewToFront:_floatingControl];
 }
 
@@ -319,9 +361,46 @@ static UILabel *VCamMakeLabel(NSString *text, UIFont *font, UIColor *color) {
 - (void)toggleFloatingPanel {
     _floatingPanel.hidden = !_floatingPanel.hidden;
     [self layoutFloatingPanel];
-    [self.view bringSubviewToFront:_floatingControl];
     if (!_floatingPanel.hidden) [self.view bringSubviewToFront:_floatingPanel];
     [self.view bringSubviewToFront:_floatingControl];
+}
+
+- (void)updateControlVisibilityButton {
+    BOOL hidden = _floatingControl.hidden;
+    [_controlVisibilityButton setTitle:(hidden ? @"Show Control" : @"Hide Control") forState:UIControlStateNormal];
+}
+
+- (void)toggleFloatingControlVisibility {
+    if (!_floatingControl) return;
+    _floatingControl.hidden = !_floatingControl.hidden;
+    _floatingPanel.hidden = YES;
+    [self updateControlVisibilityButton];
+}
+
+- (void)hideFloatingControl {
+    _floatingControl.hidden = YES;
+    _floatingPanel.hidden = YES;
+    [self updateControlVisibilityButton];
+}
+
+- (void)updateVideoButton {
+    if (!_videoButton) return;
+    NSString *mediaType = VCamCopySetting(VCamMediaTypeKey);
+    BOOL isVideo = [mediaType isKindOfClass:NSString.class] && [mediaType isEqualToString:@"video"];
+    BOOL paused = [VCamCopySetting(VCamVideoPausedKey) boolValue];
+    NSString *symbol = paused ? @"play.fill" : @"pause.fill";
+    [_videoButton setImage:[UIImage systemImageNamed:symbol] forState:UIControlStateNormal];
+    _videoButton.enabled = isVideo;
+    _videoButton.alpha = isVideo ? 1.0 : 0.35;
+    _videoButton.accessibilityLabel = paused ? @"Resume video" : @"Pause video";
+}
+
+- (void)toggleVideoPlayback {
+    NSString *mediaType = VCamCopySetting(VCamMediaTypeKey);
+    if (![mediaType isKindOfClass:NSString.class] || ![mediaType isEqualToString:@"video"]) return;
+    BOOL paused = [VCamCopySetting(VCamVideoPausedKey) boolValue];
+    VCamSetSetting(VCamVideoPausedKey, @(!paused));
+    [self updateVideoButton];
 }
 
 - (void)dragFloatingControl:(UIPanGestureRecognizer *)gesture {
@@ -423,6 +502,8 @@ static UILabel *VCamMakeLabel(NSString *text, UIFont *font, UIColor *color) {
     _toggleButton.backgroundColor = enabled ? [UIColor colorWithRed:0.66 green:0.25 blue:0.22 alpha:1]
                                             : [UIColor colorWithRed:0.13 green:0.52 blue:0.32 alpha:1];
     _diagnosticLabel.text = [self diagnosticText];
+    [self updateControlVisibilityButton];
+    [self updateVideoButton];
 }
 
 - (void)toggleLogs {
@@ -457,9 +538,8 @@ static UILabel *VCamMakeLabel(NSString *text, UIFont *font, UIColor *color) {
         [_diagnosticTimer invalidate];
         _diagnosticTimer = nil;
     }
-    [self.view bringSubviewToFront:_floatingControl];
     if (!_floatingPanel.hidden) [self.view bringSubviewToFront:_floatingPanel];
-    [self.view bringSubviewToFront:_floatingControl];
+    if (!_floatingControl.hidden) [self.view bringSubviewToFront:_floatingControl];
 }
 
 - (void)closeMenu {
@@ -531,6 +611,7 @@ static UILabel *VCamMakeLabel(NSString *text, UIFont *font, UIColor *color) {
         }
 
         VCamSetSetting(VCamMediaTypeKey, [typeIdentifier isEqualToString:VCamMovieTypeIdentifier] ? @"video" : @"image");
+        VCamSetSetting(VCamVideoPausedKey, @NO);
         VCamSetSetting(VCamMediaPathKey, destination);
         VCamSetSetting(VCamEnabledKey, @YES);
         for (NSString *existingName in [fileManager contentsOfDirectoryAtPath:directory error:nil]) {
@@ -546,6 +627,7 @@ static UILabel *VCamMakeLabel(NSString *text, UIFont *font, UIColor *color) {
         dispatch_async(dispatch_get_main_queue(), ^{
             self->_statusLabel.text = @"Media imported · Original file preserved";
             [self refreshStatus];
+            [self updateVideoButton];
         });
     }];
 }
@@ -595,7 +677,7 @@ static UILabel *VCamMakeLabel(NSString *text, UIFont *font, UIColor *color) {
                 ? [[VCamOverlayWindow alloc] initWithWindowScene:activeScene]
                 : [[VCamOverlayWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
             window.frame = UIScreen.mainScreen.bounds;
-            window.windowLevel = UIWindowLevelAlert + 100.0;
+            window.windowLevel = UIWindowLevelNormal + 1.0;
             window.backgroundColor = UIColor.clearColor;
             window.rootViewController = [[VCamMenuViewController alloc] init];
             sOverlayWindow = window;

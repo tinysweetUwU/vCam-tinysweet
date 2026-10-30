@@ -155,7 +155,9 @@ static BOOL VCamPrepareVideo(NSString *path,
                  toleranceBefore:kCMTimeZero
                   toleranceAfter:kCMTimeZero
                completionHandler:^(BOOL finished) {
-            if (finished || activePlayer.currentItem) [activePlayer play];
+            if ((finished || activePlayer.currentItem) && ![VCamCopySetting(VCamVideoPausedKey) boolValue]) {
+                [activePlayer play];
+            }
         }];
     }];
 
@@ -164,7 +166,6 @@ static BOOL VCamPrepareVideo(NSString *path,
     if (observerOut) *observerOut = endObserver;
     if (preferredTransformOut) *preferredTransformOut = videoTrack.preferredTransform;
 
-    [player play];
     VCamSetRuntimeStatus(@"mediaState", @"loaded-video");
     VCamSetRuntimeStatus(@"mediaDetail", @"Video player ready; full-resolution frames are streamed in real time");
     return YES;
@@ -217,6 +218,7 @@ void loadReplacementMedia(void) {
         sOffsetY = MAX(-1.0, MIN(1.0, VCamNumber(VCamCopySetting(VCamOffsetYKey), 0.0)));
         sZoom = MAX(0.5, MIN(3.0, VCamNumber(VCamCopySetting(VCamZoomKey), 1.0)));
         sRotation = (NSInteger)VCamNumber(VCamCopySetting(VCamRotationKey), 0);
+        BOOL videoPaused = [VCamCopySetting(VCamVideoPausedKey) boolValue];
 
         id pathValue = VCamCopySetting(VCamMediaPathKey);
         NSString *observedPath = [pathValue isKindOfClass:[NSString class]] ? [(NSString *)pathValue copy] : nil;
@@ -236,7 +238,10 @@ void loadReplacementMedia(void) {
         }
         newPath = observedPath;
         if ([newPath isEqualToString:sLoadedPath]) {
-            if (sCurrentMode == VCamModeVideo) [sVideoPlayer play];
+            if (sCurrentMode == VCamModeVideo) {
+                if (videoPaused) [sVideoPlayer pause];
+                else [sVideoPlayer play];
+            }
             return;
         }
         if (sIsLoading && [newPath isEqualToString:sRequestedPath]) return;
@@ -294,7 +299,8 @@ void loadReplacementMedia(void) {
                     sVideoPreferredTransform = preferredTransform;
                     sCurrentMode = VCamModeVideo;
                     sReplacementImage = nil;
-                    if (!sEnabled) [sVideoPlayer pause];
+                    if (!sEnabled || [VCamCopySetting(VCamVideoPausedKey) boolValue]) [sVideoPlayer pause];
+                    else [sVideoPlayer play];
                 }
             }
         }

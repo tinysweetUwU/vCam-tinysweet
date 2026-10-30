@@ -10,6 +10,7 @@ FOUNDATION_EXPORT NSString * const VCamOffsetXKey;
 FOUNDATION_EXPORT NSString * const VCamOffsetYKey;
 FOUNDATION_EXPORT NSString * const VCamRotationKey;
 FOUNDATION_EXPORT NSString * const VCamZoomKey;
+FOUNDATION_EXPORT NSString * const VCamVideoPausedKey;
 FOUNDATION_EXPORT NSString * const VCamRuntimeVersion;
 
 FOUNDATION_EXPORT id _Nullable VCamCopySetting(NSString *key);
