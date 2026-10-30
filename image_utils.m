@@ -43,12 +43,26 @@ static BOOL sIsLoading = NO;
 static NSString *sRequestedPath = nil;
 static NSString *sLoadedPath = nil;
 static BOOL sHasLoggedFirstRender = NO;
+static dispatch_queue_t sVideoFrameQueue = nil;
+static dispatch_source_t sVideoFrameTimer = nil;
+static BOOL sHasLoggedFirstVideoFrame = NO;
+static CFTimeInterval sNextLoadRetryTime = 0.0;
+static NSUInteger sLoadFailureCount = 0;
+static CFTimeInterval sLastCameraFrameAt = 0.0;
+static BOOL sVideoPlaybackPausedByUser = NO;
+static BOOL sVideoPausedForCameraIdle = NO;
 
 static void VCamEnsureState(void) {
     dispatch_once(&sLockOnce, ^{
         sLock = [[NSObject alloc] init];
-        sRenderContext = [CIContext contextWithOptions:@{ kCIContextUseSoftwareRenderer: @NO }];
+        sRenderContext = [CIContext contextWithOptions:@{
+            kCIContextUseSoftwareRenderer: @NO,
+            kCIContextCacheIntermediates: @NO
+        }];
         sRenderColorSpace = CGColorSpaceCreateDeviceRGB();
+        dispatch_queue_attr_t videoQueueAttributes = dispatch_queue_attr_make_with_qos_class(
+            DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INITIATED, 0);
+        sVideoFrameQueue = dispatch_queue_create("com.tinysweet.vcam.video-frame-pump", videoQueueAttributes);
     });
 }
 
@@ -56,7 +70,88 @@ static CGFloat VCamNumber(id value, CGFloat fallback) {
     return [value respondsToSelector:@selector(doubleValue)] ? [value doubleValue] : fallback;
 }
 
+static void VCamStopVideoFramePumpLocked(void);
+
+static void VCamStopVideoFramePumpLocked(void) {
+    if (sVideoFrameTimer) {
+        dispatch_source_cancel(sVideoFrameTimer);
+        sVideoFrameTimer = nil;
+    }
+}
+
+// Pull decoded frames away from BWNodeOutput's real-time camera callback.
+// The camera callback only consumes the newest cached pixel buffer; it never
+// asks AVPlayer to decode or synchronize a frame itself.
+static void VCamStartVideoFramePumpLocked(void) {
+    if (sVideoFrameTimer || !sVideoPlayer || !sVideoOutput || !sEnabled) return;
+    if ([VCamCopySetting(VCamVideoPausedKey) boolValue]) return;
+
+    dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, sVideoFrameQueue);
+    if (!timer) return;
+    sVideoFrameTimer = timer;
+    VCamSetRuntimeStatus(@"videoFramePump", @"starting");
+    dispatch_source_set_timer(timer,
+                              dispatch_time(DISPATCH_TIME_NOW, 0),
+                              NSEC_PER_SEC / 30,
+                              2 * NSEC_PER_MSEC);
+    dispatch_source_set_event_handler(timer, ^{
+        @autoreleasepool {
+        AVPlayer *player = nil;
+        AVPlayerItemVideoOutput *output = nil;
+        @synchronized (sLock) {
+            if (sCurrentMode != VCamModeVideo || !sEnabled || sVideoPlayer == nil || sVideoOutput == nil) return;
+            // mediaserverd can keep the player alive after Camera is dismissed.
+            // Stop decoding while no camera frames are flowing; it will resume
+            // automatically when the camera pipeline starts calling us again.
+            if (sLastCameraFrameAt > 0.0 && CACurrentMediaTime() - sLastCameraFrameAt > 2.0) {
+                [sVideoPlayer pause];
+                sVideoPausedForCameraIdle = YES;
+                sHasLoggedFirstVideoFrame = NO;
+                VCamStopVideoFramePumpLocked();
+                VCamSetRuntimeStatus(@"videoFramePump", @"paused-camera-idle");
+                return;
+            }
+            player = sVideoPlayer;
+            output = sVideoOutput;
+        }
+
+        CMTime itemTime = [output itemTimeForHostTime:CACurrentMediaTime()];
+        if (!CMTIME_IS_VALID(itemTime) || !CMTIME_IS_NUMERIC(itemTime)) itemTime = player.currentTime;
+        if (![output hasNewPixelBufferForItemTime:itemTime]) return;
+
+        CVPixelBufferRef nextBuffer = [output copyPixelBufferForItemTime:itemTime itemTimeForDisplay:NULL];
+        if (!nextBuffer) return;
+
+        BOOL accepted = NO;
+        @synchronized (sLock) {
+            if (sCurrentMode == VCamModeVideo && sEnabled && sVideoPlayer == player && sVideoOutput == output) {
+                CVPixelBufferRef previousBuffer = sCurrentVideoBuffer;
+                sCurrentVideoBuffer = nextBuffer; // transfer the +1 reference returned by AVPlayerItemVideoOutput
+                nextBuffer = NULL;
+                if (previousBuffer) CVPixelBufferRelease(previousBuffer);
+                accepted = YES;
+            }
+        }
+        if (nextBuffer) CVPixelBufferRelease(nextBuffer);
+
+        if (accepted) {
+            @synchronized (sLock) {
+                if (!sHasLoggedFirstVideoFrame && sCurrentVideoBuffer) {
+                    sHasLoggedFirstVideoFrame = YES;
+                    size_t width = CVPixelBufferGetWidth(sCurrentVideoBuffer);
+                    size_t height = CVPixelBufferGetHeight(sCurrentVideoBuffer);
+                    VCamSetRuntimeStatus(@"videoFramePump", @"active");
+                    VCamSetRuntimeStatus(@"videoFrameSize", [NSString stringWithFormat:@"%zux%zu", width, height]);
+                }
+            }
+        }
+        }
+    });
+    dispatch_resume(timer);
+}
+
 static void VCamStopVideoPlaybackLocked(void) {
+    VCamStopVideoFramePumpLocked();
     if (sVideoEndObserver) {
         [[NSNotificationCenter defaultCenter] removeObserver:sVideoEndObserver];
         sVideoEndObserver = nil;
@@ -70,6 +165,10 @@ static void VCamStopVideoPlaybackLocked(void) {
         sCurrentVideoBuffer = NULL;
     }
     sVideoPreferredTransform = CGAffineTransformIdentity;
+    sHasLoggedFirstVideoFrame = NO;
+    sVideoPlaybackPausedByUser = NO;
+    sVideoPausedForCameraIdle = NO;
+    VCamSetRuntimeStatus(@"videoFramePump", @"stopped");
 }
 
 static BOOL VCamDecodeImage(NSString *path, UIImage **imageOut) {
@@ -141,13 +240,15 @@ static BOOL VCamPrepareVideo(NSString *path,
     AVPlayerItemVideoOutput *videoOutput = [[AVPlayerItemVideoOutput alloc] initWithPixelBufferAttributes:pixelAttributes];
     AVPlayerItem *item = [AVPlayerItem playerItemWithAsset:asset];
     [item addOutput:videoOutput];
-    item.preferredForwardBufferDuration = 1.0;
+    // Keep a small decode-ahead window. The camera render callback consumes
+    // cached frames from a separate queue, so AVPlayer can use normal stall recovery.
+    item.preferredForwardBufferDuration = 0.5;
 
     AVPlayer *player = [AVPlayer playerWithPlayerItem:item];
     player.muted = YES;
     player.volume = 0.0;
     player.actionAtItemEnd = AVPlayerActionAtItemEndNone;
-    player.automaticallyWaitsToMinimizeStalling = NO;
+    player.automaticallyWaitsToMinimizeStalling = YES;
 
     __weak AVPlayer *weakPlayer = player;
     id endObserver = [[NSNotificationCenter defaultCenter] addObserverForName:AVPlayerItemDidPlayToEndTimeNotification
@@ -247,6 +348,7 @@ void loadReplacementMedia(void) {
     BOOL shouldStartLoad = NO;
 
     @synchronized (sLock) {
+        sLastCameraFrameAt = CACurrentMediaTime();
         sRefreshTicks++;
         if (sHasReadSettings && (sRefreshTicks % 10) != 0) return;
         sHasReadSettings = YES;
@@ -277,7 +379,11 @@ void loadReplacementMedia(void) {
         VCamSetRuntimeStatus(@"mediaSelectionType", observedType ?: @"unknown");
 
         if (!sEnabled) {
-            if (sCurrentMode == VCamModeVideo) [sVideoPlayer pause];
+            if (sCurrentMode == VCamModeVideo) {
+                [sVideoPlayer pause];
+                VCamStopVideoFramePumpLocked();
+                VCamSetRuntimeStatus(@"videoFramePump", @"paused-replacement-disabled");
+            }
             VCamSetRuntimeStatus(@"replacementRendered", @NO);
             VCamSetRuntimeStatus(@"mediaState", @"disabled");
             VCamSetRuntimeStatus(@"mediaDetail", @"Replacement is turned off");
@@ -291,17 +397,33 @@ void loadReplacementMedia(void) {
         }
         newPath = observedPath;
         if ([newPath isEqualToString:sLoadedPath]) {
-            if (sCurrentMode == VCamModeVideo) {
-                if (videoPaused) [sVideoPlayer pause];
-                else [sVideoPlayer play];
+            if (sCurrentMode == VCamModeVideo && sVideoPlayer) {
+                if (videoPaused) {
+                    if (!sVideoPlaybackPausedByUser) {
+                        sVideoPlaybackPausedByUser = YES;
+                        [sVideoPlayer pause];
+                        VCamStopVideoFramePumpLocked();
+                        VCamSetRuntimeStatus(@"videoFramePump", @"paused-by-user");
+                    }
+                } else if (sVideoPlaybackPausedByUser || sVideoPausedForCameraIdle || !sVideoFrameTimer) {
+                    sVideoPlaybackPausedByUser = NO;
+                    sVideoPausedForCameraIdle = NO;
+                    [sVideoPlayer play];
+                    VCamStartVideoFramePumpLocked();
+                }
             }
             return;
         }
         if (sIsLoading && [newPath isEqualToString:sRequestedPath]) return;
+        if (sNextLoadRetryTime > CACurrentMediaTime() && [newPath isEqualToString:sRequestedPath]) return;
 
         sLoadGeneration++;
         generation = sLoadGeneration;
+        if (sRequestedPath && ![newPath isEqualToString:sRequestedPath]) {
+            sLoadFailureCount = 0;
+        }
         sRequestedPath = [newPath copy];
+        sNextLoadRetryTime = 0.0;
         sIsLoading = YES;
         sCurrentMode = VCamModeNone;
         sReplacementImage = nil;
@@ -332,8 +454,14 @@ void loadReplacementMedia(void) {
                     return;
                 }
                 sIsLoading = NO;
-                sLoadedPath = [newPath copy];
                 if (!success) {
+                    sLoadedPath = nil;
+                    sRequestedPath = [newPath copy];
+                    sLoadFailureCount++;
+                    CFTimeInterval retryDelay = MIN(30.0, 3.0 * (double)sLoadFailureCount);
+                    sNextLoadRetryTime = CACurrentMediaTime() + retryDelay;
+                    VCamSetRuntimeStatus(@"mediaRetryCount", @(sLoadFailureCount));
+                    VCamSetRuntimeStatus(@"mediaRetryAfterSeconds", @(retryDelay));
                     VCamSetRuntimeStatus(@"mediaState", @"load-failed");
                     VCamSetRuntimeStatus(@"replacementRendered", @NO);
                     sCurrentMode = VCamModeNone;
@@ -341,7 +469,11 @@ void loadReplacementMedia(void) {
                     VCamStopVideoPlaybackLocked();
                     return;
                 }
+                sLoadedPath = [newPath copy];
                 sRequestedPath = nil;
+                sLoadFailureCount = 0;
+                sNextLoadRetryTime = 0.0;
+                VCamSetRuntimeStatus(@"mediaRetryCount", @0);
                 if (image) {
                     sReplacementImage = image;
                     sCurrentMode = VCamModeImage;
@@ -353,8 +485,15 @@ void loadReplacementMedia(void) {
                     sVideoPreferredTransform = preferredTransform;
                     sCurrentMode = VCamModeVideo;
                     sReplacementImage = nil;
-                    if (!sEnabled || [VCamCopySetting(VCamVideoPausedKey) boolValue]) [sVideoPlayer pause];
-                    else [sVideoPlayer play];
+                    sVideoPlaybackPausedByUser = [VCamCopySetting(VCamVideoPausedKey) boolValue];
+                    sVideoPausedForCameraIdle = NO;
+                    if (!sEnabled || sVideoPlaybackPausedByUser) {
+                        [sVideoPlayer pause];
+                        if (sVideoPlaybackPausedByUser) VCamSetRuntimeStatus(@"videoFramePump", @"paused-by-user");
+                    } else {
+                        [sVideoPlayer play];
+                        VCamStartVideoFramePumpLocked();
+                    }
                 }
             }
         }
@@ -366,8 +505,6 @@ void drawReplacementOntoBuffer(CVPixelBufferRef targetBuffer) {
     VCamEnsureState();
 
     UIImage *replacementImage = nil;
-    AVPlayer *videoPlayer = nil;
-    AVPlayerItemVideoOutput *videoOutput = nil;
     CGAffineTransform videoTransform = CGAffineTransformIdentity;
     VCamMode mode = VCamModeNone;
     CGFloat offsetXValue = 0.0;
@@ -381,8 +518,6 @@ void drawReplacementOntoBuffer(CVPixelBufferRef targetBuffer) {
         if (!sEnabled || sCurrentMode == VCamModeNone || !sRenderContext) return;
         mode = sCurrentMode;
         replacementImage = sReplacementImage;
-        videoPlayer = sVideoPlayer;
-        videoOutput = sVideoOutput;
         videoTransform = sVideoPreferredTransform;
         offsetXValue = sOffsetX;
         offsetYValue = sOffsetY;
@@ -396,20 +531,9 @@ void drawReplacementOntoBuffer(CVPixelBufferRef targetBuffer) {
     CVPixelBufferRef videoBuffer = NULL;
     if (mode == VCamModeImage && replacementImage.CGImage) {
         source = [CIImage imageWithCGImage:replacementImage.CGImage];
-    } else if (mode == VCamModeVideo && videoOutput && videoPlayer) {
-        CMTime itemTime = [videoOutput itemTimeForHostTime:CACurrentMediaTime()];
-        if (!CMTIME_IS_VALID(itemTime) || !CMTIME_IS_NUMERIC(itemTime)) itemTime = videoPlayer.currentTime;
-        if ([videoOutput hasNewPixelBufferForItemTime:itemTime]) {
-            CVPixelBufferRef nextBuffer = [videoOutput copyPixelBufferForItemTime:itemTime itemTimeForDisplay:NULL];
-            if (nextBuffer) {
-                @synchronized (sLock) {
-                    if (sCurrentVideoBuffer) CVPixelBufferRelease(sCurrentVideoBuffer);
-                    sCurrentVideoBuffer = nextBuffer;
-                    CVPixelBufferRetain(sCurrentVideoBuffer);
-                }
-                CVPixelBufferRelease(nextBuffer);
-            }
-        }
+    } else if (mode == VCamModeVideo) {
+        // Frame extraction happens on sVideoFrameQueue. Camera delivery only
+        // retains the latest frame, avoiding AVPlayer synchronization on this hot path.
         @synchronized (sLock) {
             if (sCurrentVideoBuffer) {
                 videoBuffer = sCurrentVideoBuffer;

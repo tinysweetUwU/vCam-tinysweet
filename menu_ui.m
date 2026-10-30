@@ -501,6 +501,8 @@ static UILabel *VCamMakeLabel(NSString *text, UIFont *font, UIColor *color) {
 
     NSString *daemonVersion = [runtime[@"runtimeVersion"] isKindOfClass:NSString.class] ? runtime[@"runtimeVersion"] : @"unknown";
     NSString *fileAccess = [runtime[@"mediaFileAccess"] isKindOfClass:NSString.class] ? [runtime[@"mediaFileAccess"] uppercaseString] : @"WAITING";
+    NSString *videoPump = [runtime[@"videoFramePump"] isKindOfClass:NSString.class] ? runtime[@"videoFramePump"] : @"not-active";
+    NSString *videoFrameSize = [runtime[@"videoFrameSize"] isKindOfClass:NSString.class] ? runtime[@"videoFrameSize"] : @"waiting";
     NSMutableArray<NSString *> *lines = [NSMutableArray arrayWithArray:@[
         daemonLine,
         [NSString stringWithFormat:@"Camera daemon version: %@", daemonVersion],
@@ -510,12 +512,16 @@ static UILabel *VCamMakeLabel(NSString *text, UIFont *font, UIColor *color) {
         enabledLine,
         selectionLine,
         [NSString stringWithFormat:@"Media file access: %@", fileAccess],
+        [NSString stringWithFormat:@"Video frame pump: %@ (%@)", videoPump.uppercaseString, videoFrameSize],
         mediaLine,
         outputLine,
         @"Camera coverage: front and rear live preview streams"
     ]];
     if (hookDetail.length) [lines addObject:[@"Hook detail: " stringByAppendingString:hookDetail]];
     if (renderError.length) [lines addObject:[@"Render error: " stringByAppendingString:renderError]];
+    if ([runtime[@"mediaRetryCount"] respondsToSelector:@selector(integerValue)] && [runtime[@"mediaRetryCount"] integerValue] > 0) {
+        [lines addObject:[NSString stringWithFormat:@"Media load retries: %@ (next retry in %@s)", runtime[@"mediaRetryCount"], runtime[@"mediaRetryAfterSeconds"] ?: @"?"]];
+    }
 
     if (!mediaLoaded) {
         [lines addObject:@"Action: enable Tweak Injection in Relaxin and run a Userspace Reboot."];
@@ -700,13 +706,24 @@ static UILabel *VCamMakeLabel(NSString *text, UIFont *font, UIColor *color) {
     CGFloat value = [VCamCopySetting(VCamOffsetYKey) respondsToSelector:@selector(doubleValue)] ? [VCamCopySetting(VCamOffsetYKey) doubleValue] : 0.0;
     VCamSetSetting(VCamOffsetYKey, @(MAX(-1.0, MIN(1.0, value + delta))));
 }
-- (void)moveLeft { [self adjustOffsetX:VCamMoveStep]; }
-- (void)moveRight { [self adjustOffsetX:-VCamMoveStep]; }
-- (void)moveUp { [self adjustOffsetY:VCamMoveStep]; }
-- (void)moveDown { [self adjustOffsetY:-VCamMoveStep]; }
+// Match the visible arrow direction to the movement of the replacement image.
+// The previous offset signs were inverted on both axes for the camera output.
+- (void)moveLeft { [self adjustOffsetX:-VCamMoveStep]; }
+- (void)moveRight { [self adjustOffsetX:VCamMoveStep]; }
+- (void)moveUp { [self adjustOffsetY:-VCamMoveStep]; }
+- (void)moveDown { [self adjustOffsetY:VCamMoveStep]; }
 - (void)resetPosition { VCamSetSetting(VCamOffsetXKey, @0.0); VCamSetSetting(VCamOffsetYKey, @0.0); }
-- (void)rotateLeft { NSInteger value = [VCamCopySetting(VCamRotationKey) integerValue]; VCamSetSetting(VCamRotationKey, @((value - 90 + 360) % 360)); }
-- (void)rotateRight { NSInteger value = [VCamCopySetting(VCamRotationKey) integerValue]; VCamSetSetting(VCamRotationKey, @((value + 90) % 360)); }
+// Core Image uses a y-up coordinate system: positive angles rotate
+// counter-clockwise on screen. Keep the button labels aligned with that
+// visual direction (left = CCW, right = CW).
+- (void)rotateLeft {
+    NSInteger value = [VCamCopySetting(VCamRotationKey) integerValue];
+    VCamSetSetting(VCamRotationKey, @((value + 90) % 360));
+}
+- (void)rotateRight {
+    NSInteger value = [VCamCopySetting(VCamRotationKey) integerValue];
+    VCamSetSetting(VCamRotationKey, @((value - 90 + 360) % 360));
+}
 - (void)zoomIn { CGFloat value = [VCamCopySetting(VCamZoomKey) respondsToSelector:@selector(doubleValue)] ? [VCamCopySetting(VCamZoomKey) doubleValue] : 1.0; VCamSetSetting(VCamZoomKey, @(MIN(3.0, value + 0.1))); }
 - (void)zoomOut { CGFloat value = [VCamCopySetting(VCamZoomKey) respondsToSelector:@selector(doubleValue)] ? [VCamCopySetting(VCamZoomKey) doubleValue] : 1.0; VCamSetSetting(VCamZoomKey, @(MAX(0.5, value - 0.1))); }
 @end
